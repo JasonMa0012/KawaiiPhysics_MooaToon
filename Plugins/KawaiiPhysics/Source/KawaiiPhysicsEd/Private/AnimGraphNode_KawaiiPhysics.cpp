@@ -1,4 +1,4 @@
-// Copyright 2019-2025 pafuhana1213. All Rights Reserved.
+// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
 
 #include "AnimGraphNode_KawaiiPhysics.h"
 
@@ -18,6 +18,7 @@
 #include "Dialogs/DlgPickAssetPath.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
+#include "Widgets/Layout/SSeparator.h"
 
 #if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 6
 #include "Widgets/SBoxPanel.h"

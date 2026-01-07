@@ -1,4 +1,4 @@
-// Copyright 2019-2025 pafuhana1213. All Rights Reserved.
+// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
 
 #include "KawaiiPhysicsEditMode.h"
 #include "CanvasItem.h"
@@ -7,7 +7,7 @@
 #include "EditorViewportClient.h"
 #include "IPersonaPreviewScene.h"
 #include "KawaiiPhysics.h"
-#include "KawaiiPhysicsExternalForce.h"
+#include "ExternalForces/KawaiiPhysicsExternalForce.h"
 #include "KawaiiPhysicsLimitsDataAsset.h"
 #include "SceneManagement.h"
 #include "Animation/DebugSkelMeshComponent.h"
@@ -67,6 +67,9 @@ void FKawaiiPhysicsEditMode::EnterMode(UAnimGraphNode_Base* InEditorNode, FAnimN
 	GraphNode->Node.PlanarLimitsData = RuntimeNode->PlanarLimitsData;
 	GraphNode->Node.BoneConstraintsData = RuntimeNode->BoneConstraintsData;
 	GraphNode->Node.MergedBoneConstraints = RuntimeNode->MergedBoneConstraints;
+
+	// SyncBone
+	GraphNode->Node.SyncBones = RuntimeNode->SyncBones;
 
 	NodePropertyDelegateHandle = GraphNode->OnNodePropertyChanged().AddSP(
 		this, &FKawaiiPhysicsEditMode::OnExternalNodePropertyChange);
@@ -251,7 +254,6 @@ void FKawaiiPhysicsEditMode::RenderSyncBone(FPrimitiveDrawInterface* PDI) const
 		DrawDirectionalArrow(PDI, TransformMatrix, FLinearColor::Green, Force.Length(), 2.0f, SDPG_Foreground);
 	};
 
-
 	for (auto& SyncBone : RuntimeNode->SyncBones)
 	{
 		// InitialPoseLocation
@@ -267,31 +269,37 @@ void FKawaiiPhysicsEditMode::RenderSyncBone(FPrimitiveDrawInterface* PDI) const
 		               SyncBone.InitialPoseLocation + SyncBone.DeltaDistance,
 		               FLinearColor::Green, 0.1f, SDPG_World);
 
+		// Distance attenuation radii
+		if (SyncBone.bEnableDistanceAttenuation)
+		{
+			const FVector Center = SyncBone.InitialPoseLocation + SyncBone.DeltaDistance;
+			// current location in component space
+			if (SyncBone.AttenuationInnerRadius > 0.0f)
+			{
+				DrawWireSphere(PDI, Center, FLinearColor(0.0f, 0.8f, 1.0f), SyncBone.AttenuationInnerRadius, 24,
+				               SDPG_World);
+			}
+			if (SyncBone.AttenuationOuterRadius > 0.0f)
+			{
+				DrawWireSphere(PDI, Center, FLinearColor(0.0f, 0.3f, 0.0f), SyncBone.AttenuationOuterRadius, 24,
+				               SDPG_World);
+			}
+		}
+
 		// Force By SyncForce
 		FVector Force = SyncBone.DeltaDistance;
-		ApplyDirectionFilterAndAlpha(Force.X, SyncBone.GlobalAlpha.X, SyncBone.ApplyDirectionX);
-		ApplyDirectionFilterAndAlpha(Force.Y, SyncBone.GlobalAlpha.Y, SyncBone.ApplyDirectionY);
-		ApplyDirectionFilterAndAlpha(Force.Z, SyncBone.GlobalAlpha.Z, SyncBone.ApplyDirectionZ);
+		ApplyDirectionFilterAndAlpha(Force.X, SyncBone.GlobalScale.X, SyncBone.ApplyDirectionX);
+		ApplyDirectionFilterAndAlpha(Force.Y, SyncBone.GlobalScale.Y, SyncBone.ApplyDirectionY);
+		ApplyDirectionFilterAndAlpha(Force.Z, SyncBone.GlobalScale.Z, SyncBone.ApplyDirectionZ);
 		DrawForceArrow(Force, SyncBone.InitialPoseLocation);
 
 		// Target Bone
-		for (auto& Target : SyncBone.Targets)
+		for (auto& TargetRoot : SyncBone.TargetRoots)
 		{
-			if (Target.ModifyBoneIndex >= 0 && RuntimeNode->ModifyBones.IsValidIndex(Target.ModifyBoneIndex))
+			TargetRoot.DebugDraw(PDI, RuntimeNode);
+			for (auto& ChildTarget : TargetRoot.ChildTargets)
 			{
-				// Target Bone Location
-				FVector TargetBoneLocation = RuntimeNode->ModifyBones[Target.ModifyBoneIndex].Location;
-				if (RuntimeNode->SimulationSpace == EKawaiiPhysicsSimulationSpace::BaseBoneSpace)
-				{
-					const FTransform& BaseBoneSpace2ComponentSpace = RuntimeNode->GetBaseBoneSpace2ComponentSpace();
-					TargetBoneLocation = BaseBoneSpace2ComponentSpace.TransformPosition(TargetBoneLocation);
-				}
-				DrawSphere(PDI, TargetBoneLocation, FRotator::ZeroRotator, 
-					FVector(1.0f), 12, 6,
-					GEngine->ConstraintLimitMaterialY->GetRenderProxy(), SDPG_World);
-
-				// Force by SyncBone
-				DrawForceArrow(Target.TransitionBySyncBone, TargetBoneLocation);
+				ChildTarget.DebugDraw(PDI, RuntimeNode);
 			}
 		}
 	}

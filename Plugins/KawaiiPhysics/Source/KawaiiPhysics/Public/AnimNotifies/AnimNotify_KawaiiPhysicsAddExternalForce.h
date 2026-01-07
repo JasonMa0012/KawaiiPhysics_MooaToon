@@ -1,4 +1,4 @@
-﻿// Copyright 2019-2025 pafuhana1213. All Rights Reserved.
+﻿// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
 
 #pragma once
 
@@ -12,7 +12,7 @@
 #include "InstancedStruct.h"
 #endif
 
-#include "AnimNotify_KawaiiPhysics.generated.h"
+#include "AnimNotify_KawaiiPhysicsAddExternalForce.generated.h"
 
 /**
  * UAnimNotify_KawaiiPhysicsAddExternalForce

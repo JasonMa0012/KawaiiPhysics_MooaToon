@@ -1,4 +1,4 @@
-// Copyright 2019-2025 pafuhana1213. All Rights Reserved.
+// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
 
 #pragma once
 
@@ -8,7 +8,6 @@
 #include "GameplayTagContainer.h"
 
 #include "BoneControllers/AnimNode_AnimDynamics.h"
-#include "BoneControllers/AnimNode_RigidBody.h"
 #include "BoneControllers/AnimNode_SkeletalControlBase.h"
 
 #if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 5
@@ -33,6 +32,7 @@ class UKawaiiPhysicsBoneConstraintsDataAsset;
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsEnable;
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsDebug;
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsDebugLengthRate;
+extern KAWAIIPHYSICS_API TAutoConsoleVariable<float> CVarAnimNodeKawaiiPhysicsDebugDrawThickness;
 #endif
 
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsUseBoneContainerRefSkeletonWhenInit;
@@ -162,8 +162,8 @@ struct FCollisionLimitBase
 		Location = Other.Location;
 		Rotation = Other.Rotation;
 		bEnable = Other.bEnable;
-#if WITH_EDITORONLY_DATA
 		SourceType = Other.SourceType;
+#if WITH_EDITORONLY_DATA
 		Guid = Other.Guid;
 		Type = Other.Type;
 #endif
@@ -574,7 +574,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* 指定ボーンとそれ以下のボーンを制御対象に(追加用)
 	* Control the specified bone and the bones below it (For Addition)
 	*/
-	UPROPERTY(EditAnywhere, Category = "Bones")
+	UPROPERTY(EditAnywhere, Category = "Bones", meta=(TitleProperty="RootBone"))
 	TArray<FKawaiiPhysicsRootBoneSetting> AdditionalRootBones;
 
 	/** 
@@ -877,13 +877,40 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	TArray<FKawaiiPhysicsSyncBone> SyncBones;
 
 	/**
-	* 外力（重力など）
-	* External forces (gravity, etc.)
+	* 重力
+	* Gravity
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
-		meta = (PinHiddenByDefault, DisplayName="External Force"))
+		meta = (PinHiddenByDefault))
 	FVector Gravity = FVector::ZeroVector;
 
+	/**
+	* Gravityの適用方式（レガシー互換）
+	* true : 従来互換（位置に 0.5 * Gravity * dt^2 を加算）
+	* false: AnimDynamics互換（速度に Gravity * dt を加算してから位置更新）
+	* Gravity application method (legacy compatibility)
+	* true : Legacy compatibility (add 0.5 * Gravity * dt^2 to position)
+	* false: AnimDynamics compatibility (add Gravity * dt to velocity before updating position)
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	bool bUseLegacyGravity = false;
+
+	/**
+	* Gravityベクトルにプロジェクト設定の DefaultGravityZ（絶対値）を乗算する処理のフラグ
+	* Flag to multiply the DefaultGravityZ (absolute value) of the project settings to the Gravity vector
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	bool bUseDefaultGravityZProjectSetting = false;
+
+	// 
+	// 重力をワールド座標系で扱うかどうかのフラグ
+	// Flag to handle gravity in world coordinate system
+	//
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	bool bUseWorldSpaceGravity = true;
+
+	// 外力としてWindDirectionalSourceの影響を受けるかどうかのフラグ
+	// Flag to receive the influence of WindDirectionalSource as an external force
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
 	bool bEnableWind = false;
 
@@ -903,6 +930,18 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 		meta = (EditCondition = "bEnableWind", Units = "Degrees", ClampMin=0, PinHiddenByDefault))
 	float WindDirectionNoiseAngle = 0.0f;
 
+	// 単純な外力ベクトル
+	// Simple external force vector
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+		meta = (PinHiddenByDefault))
+	FVector SimpleExternalForce = FVector::ZeroVector;
+
+	// 単純な外力をワールド座標系で扱うかどうかのフラグ
+	// Flag to handle simple external forces in world coordinate system
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+		meta = (PinHiddenByDefault))
+	bool bUseWorldSpaceSimpleExternalForce = true;
+	
 	/** 
 	* 外力のプリセット。C++で独自のプリセットを追加可能(Instanced Struct)
 	* External force presets. You can add your own presets in C++.
@@ -1007,16 +1046,19 @@ private:
 	 * Flag indicating whether to reset the dynamics.
 	 */
 	FVector GravityInSimSpace = FVector::ZeroVector;
+
+	// Cached simple external force in current SimulationSpace (computed once per SimulateModifyBones)
+	FVector SimpleExternalForceInSimSpace = FVector::ZeroVector;
 	
 	/**
 	 *	 The last simulation space used for the physics simulation.
 	 */
 	EKawaiiPhysicsSimulationSpace LastSimulationSpace = EKawaiiPhysicsSimulationSpace::ComponentSpace;
-
+	
 	/**
-	 * Base bone space to component space transform.
+	 * Previous frame's Base bone space to component space transform
 	 */
-	FTransform BaseBoneSpace2ComponentSpace = FTransform::Identity;
+	FTransform PrevBaseBoneSpace2ComponentSpace = FTransform::Identity;
 
 	/**
 	* Stores the delta time from the previous frame.
@@ -1080,7 +1122,47 @@ public:
 	/**
 	 * Get Transform from BaseBoneSpace to ComponentSpace.
 	 */
-	FTransform GetBaseBoneSpace2ComponentSpace() const { return BaseBoneSpace2ComponentSpace; }
+	FTransform GetBaseBoneSpace2ComponentSpace() const
+	{
+		if (SimulationSpace == EKawaiiPhysicsSimulationSpace::BaseBoneSpace)
+		{
+			return CurrentEvalSimSpaceCache.TargetSpaceToComponent;
+		}
+
+		return FTransform::Identity;
+	}
+
+	// Given a bone index, get the transform in the currently selected simulation space
+	FTransform GetBoneTransformInSimSpace(FComponentSpacePoseContext& Output,
+	                                      const FCompactPoseBoneIndex& BoneIndex) const;
+
+	// Convert a transform from one simulation space to another (internal cache-aware)
+	FTransform ConvertSimulationSpaceTransform(FComponentSpacePoseContext& Output,
+	                                           EKawaiiPhysicsSimulationSpace From,
+	                                           EKawaiiPhysicsSimulationSpace To,
+	                                           const FTransform& InTransform) const;
+
+	// Convert a vector from one simulation space to another (internal cache-aware)
+	FVector ConvertSimulationSpaceVector(FComponentSpacePoseContext& Output,
+	                                     EKawaiiPhysicsSimulationSpace From,
+	                                     EKawaiiPhysicsSimulationSpace To,
+	                                     const FVector& InVector) const;
+
+	// Convert a location from one simulation space to another (internal cache-aware)
+	FVector ConvertSimulationSpaceLocation(FComponentSpacePoseContext& Output,
+	                                       EKawaiiPhysicsSimulationSpace From,
+	                                       EKawaiiPhysicsSimulationSpace To,
+	                                       const FVector& InLocation) const;
+
+	// Convert a rotation from one simulation space to another (internal cache-aware)
+	FQuat ConvertSimulationSpaceRotation(FComponentSpacePoseContext& Output,
+	                                     EKawaiiPhysicsSimulationSpace From,
+	                                     EKawaiiPhysicsSimulationSpace To,
+	                                     const FQuat& InRotation) const;
+
+	void ConvertSimulationSpace(FComponentSpacePoseContext& Output,
+	                            EKawaiiPhysicsSimulationSpace From,
+	                            EKawaiiPhysicsSimulationSpace To);
 
 protected:
 	/**
@@ -1107,6 +1189,12 @@ protected:
 	 * Initializes the sync rotation bones for the physics simulation.
 	 */
 	void InitSyncBones(FComponentSpacePoseContext& Output);
+
+	/**
+	* Initializes a sync bone for the physics simulation.
+	*/
+	void InitSyncBone(FComponentSpacePoseContext& Output, const FBoneContainer& BoneContainer,
+	                  FKawaiiPhysicsSyncBone& SyncBone);
 
 	/**
 	 * Initializes the bone constraints for the physics simulation.
@@ -1259,7 +1347,6 @@ protected:
 	 * @param Bone The bone to simulate.
 	 * @param Scene The scene interface.
 	 * @param ComponentTransform The component transform.
-	 * @param GravityCS The gravity vector in component space.
 	 * @param Exponent The exponent for the simulation.
 	 * @param SkelComp The skeletal mesh component.
 	 * @param Output The pose context.
@@ -1347,50 +1434,86 @@ protected:
 	 *
 	 * @param Output The pose context.
 	 * @param BoneContainer The bone container.
-	 * @param ComponentTransform The component transform.
+	 * @param InOutComponentTransform The component transform.
 	 */
 	void WarmUp(FComponentSpacePoseContext& Output, const FBoneContainer& BoneContainer,
-	            FTransform& ComponentTransform);
+	            FTransform& InOutComponentTransform);
 
 	/**
 	 * Gets the wind velocity for a given bone.
 	 *
 	 * @param Scene The scene interface.
-	 * @param ComponentTransform The component transform.
 	 * @param Bone The bone to get the wind velocity for.
 	 * @return The wind velocity vector.
 	 */
-	FVector GetWindVelocity(const FComponentSpacePoseContext& Output, const FSceneInterface* Scene,
+	FVector GetWindVelocity(FComponentSpacePoseContext& Output, const FSceneInterface* Scene,
 	                        const FKawaiiPhysicsModifyBone& Bone) const;
 
 #if ENABLE_ANIM_DEBUG
 	void AnimDrawDebug(FComponentSpacePoseContext& Output);
+
+	// Draw debug Box
+	void AnimDrawDebugBox(FComponentSpacePoseContext& Output, const FVector& CenterLocationSim,
+	                      const FQuat& RotationSim,
+	                      const FVector& Extent, const FColor& Color, float Thickness) const;
 #endif
 
+
 private:
-	// Given a bone index, get it's transform in the currently selected simulation space
-	FTransform GetBoneTransformInSimSpace(FComponentSpacePoseContext& Output,
-	                                      const FCompactPoseBoneIndex& BoneIndex) const;
+	// SimulationSpace conversion cache (per-evaluation)
+	struct FSimulationSpaceCache
+	{
+		FTransform ComponentToTargetSpace = FTransform::Identity;
+		FTransform TargetSpaceToComponent = FTransform::Identity;
 
-	// Convert a transform from one simulation space to another
-	FTransform ConvertSimulationSpaceTransform(const FComponentSpacePoseContext& Output, EKawaiiPhysicsSimulationSpace From,
-	                                           EKawaiiPhysicsSimulationSpace To, const FTransform& InTransform) const;
+		bool IsIdentity() const
+		{
+			return ComponentToTargetSpace.Equals(FTransform::Identity) &&
+				TargetSpaceToComponent.Equals(FTransform::Identity);
+		}
+	};
 
-	// Convert a vector from one simulation space to another
-	FVector ConvertSimulationSpaceVector(const FComponentSpacePoseContext& Output, EKawaiiPhysicsSimulationSpace From,
-	                                     EKawaiiPhysicsSimulationSpace To, const FVector& InVector) const;
+	FSimulationSpaceCache BuildSimulationSpaceCache(FComponentSpacePoseContext& Output,
+	                                                const EKawaiiPhysicsSimulationSpace SimulationSpaceForCache) const;
 
-	// Convert a location from one simulation space to another
-	FVector ConvertSimulationSpaceLocation(const FComponentSpacePoseContext& Output, EKawaiiPhysicsSimulationSpace From,
-	                                       EKawaiiPhysicsSimulationSpace To, const FVector& InLocation) const;
+	// Select cache for a given simulation space (Evaluate cache preferred)
+	FSimulationSpaceCache GetSimulationSpaceCacheFor(FComponentSpacePoseContext& Output,
+	                                                 EKawaiiPhysicsSimulationSpace Space) const;
 
-	// Convert a rotation from one simulation space to another
-	FQuat ConvertSimulationSpaceRotation(FComponentSpacePoseContext& Output, EKawaiiPhysicsSimulationSpace From,
-	                                     EKawaiiPhysicsSimulationSpace To, const FQuat& InRotation) const;
+	// Convert helpers using explicit caches
+	FTransform ConvertSimulationSpaceTransformCached(const FSimulationSpaceCache& CacheFrom,
+	                                                 const FSimulationSpaceCache& CacheTo,
+	                                                 const FTransform& InTransform) const;
+	FVector ConvertSimulationSpaceVectorCached(const FSimulationSpaceCache& CacheFrom,
+	                                           const FSimulationSpaceCache& CacheTo,
+	                                           const FVector& InVector) const;
+	FVector ConvertSimulationSpaceLocationCached(const FSimulationSpaceCache& CacheFrom,
+	                                             const FSimulationSpaceCache& CacheTo,
+	                                             const FVector& InLocation) const;
+	FQuat ConvertSimulationSpaceRotationCached(const FSimulationSpaceCache& CacheFrom,
+	                                           const FSimulationSpaceCache& CacheTo,
+	                                           const FQuat& InRotation) const;
 
-	void ConvertSimulationSpace(FComponentSpacePoseContext& Output, EKawaiiPhysicsSimulationSpace From, EKawaiiPhysicsSimulationSpace To);
+	void ConvertSimulationSpaceCached(const FSimulationSpaceCache& CacheFrom,
+	                                  const FSimulationSpaceCache& CacheTo,
+	                                  EKawaiiPhysicsSimulationSpace From,
+	                                  EKawaiiPhysicsSimulationSpace To);
 
-	// Initialize a sync bone
-	void InitSyncBone(FComponentSpacePoseContext& Output, const FBoneContainer& BoneContainer,
-	                  FKawaiiPhysicsSyncBone& SyncBone);
+private:
+	// Evaluate中のみ有効なキャッシュ（SimulationSpace<->Component）
+	// AnyThread評価なので「フレーム跨ぎで使い回さない」こと
+	mutable FSimulationSpaceCache CurrentEvalSimSpaceCache;
+	mutable bool bHasCurrentEvalSimSpaceCache = false;
+
+	// Evaluate中のみ有効なWorldSpaceキャッシュ（World<->Component）
+	mutable FSimulationSpaceCache CurrentEvalWorldSpaceCache;
+	mutable bool bHasCurrentEvalWorldSpaceCache = false;
 };
+
+
+
+
+
+
+
+
