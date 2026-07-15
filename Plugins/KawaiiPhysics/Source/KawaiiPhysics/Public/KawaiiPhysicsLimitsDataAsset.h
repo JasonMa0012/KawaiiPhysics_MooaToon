@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "AnimNode_KawaiiPhysics.h"
+#include "KawaiiPhysicsCollisionLimits.h"
 #include "Engine/DataAsset.h"
 #include "Interfaces/Interface_BoneReferenceSkeletonProvider.h"
 #include "KawaiiPhysicsLimitsDataAsset.generated.h"
@@ -139,7 +139,8 @@ struct FPlanarLimitData : public FCollisionLimitDataBase
 };
 
 /**
- * 
+ * コリジョン Limit（球/カプセル/ボックス/平面）をまとめて定義し、複数の KawaiiPhysics ノードで流用するための DataAsset。
+ * DataAsset that defines collision limits (sphere/capsule/box/planar) for reuse across multiple KawaiiPhysics nodes.
  */
 UCLASS(Blueprintable)
 class KAWAIIPHYSICS_API UKawaiiPhysicsLimitsDataAsset : public UDataAsset, public IBoneReferenceSkeletonProvider
@@ -193,5 +194,8 @@ public:
 private:
 #if WITH_EDITOR
 	void Sync();
+
+	/** コリジョン配列のGuidを一意化する（複製/貼り付け/旧データの重複Guidを再発番） */
+	void EnsureUniqueCollisionGuids();
 #endif
 };

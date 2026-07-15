@@ -22,7 +22,24 @@ Kawaii Physicsは、Unreal Engine向けのシンプルな疑似物理プラグ�
 
 [デモ動画 (Demo Video)](https://youtu.be/0f-l-SP07Mo)
 
-## 🖼️ ギャラリー (Gallery)
+<details>
+<summary>目次 (Contents)</summary>
+
+- [ギャラリー](#ギャラリー)
+- [特徴](#特徴)
+- [導入方法](#導入方法)
+- [ドキュメント＆コミュニティ](#ドキュメントコミュニティ)
+- [解説記事・動画](#解説記事動画)
+- [サンプル](#サンプル)
+- [採用実績](#採用実績)
+- [関連ツール](#関連ツール)
+- [ライセンス](#ライセンス)
+- [作者](#作者)
+- [更新履歴](#更新履歴)
+
+</details>
+
+## ギャラリー
 
 <img src="https://github.com/user-attachments/assets/fda69859-b60f-4fde-a683-62da3e2839e4" alt="compare" width="640px">
 
@@ -36,7 +53,7 @@ Kawaii Physicsは、Unreal Engine向けのシンプルな疑似物理プラグ�
 
 *キャラクター：[TA式 鷺宮カノ](https://uzurig.com/ja/uzurig2-rigging-plugin-for-maya-jp/) / モーション：[しかのこのこのここしたんたん](https://booth.pm/ja/items/5975857) / セットアップ：[株式会社TA様](https://xta.co.jp/)*
 
-## ✨ 特徴 (Features)
+## 特徴
 
 <table>
   <tr>
@@ -45,19 +62,22 @@ Kawaii Physicsは、Unreal Engine向けのシンプルな疑似物理プラグ�
   </tr>
 </table>
 
-- アニメーションやキャラクターの動きに基づいた物理制御
-- AnimGraph内の`KawaiiPhysics`ノード一つで簡単にセットアップ
-- 球・カプセル・平面のコリジョンに対応し、ビューポートで直感的に調整可能
-- 計算が破綻してもスケルトンが伸び縮みしない安定性
-- PhysX非依存の軽量なアルゴリズム
-- 風や重力だけでなく、演出目的の外力も適用可能
-- `DataAsset`や`PhysicsAsset`を使ったパラメータの保存・共有が可能
+- アニメーションやキャラクターの動きに合わせて、揺れものを物理制御します
+- AnimGraphに`KawaiiPhysics`ノードをひとつ追加するだけで使えます
+- 球・カプセル・平面のコリジョンに対応。ビューポート上で直感的に調整できます
+- 骨の長さを保つので、計算が破綻してもボーンが伸び縮みしません
+- PhysXに頼らないシンプルな計算なので、動作が軽いのが特長です
+- 風や重力に加えて、演出目的の外力も加えられます
+- `DataAsset`や`PhysicsAsset`にパラメータを保存して使い回せます
+- ボーン間の距離制約で、スカートの裾が足を貫通するのを抑えられます（BoneConstraint)
+- アニメ制御下のボーン（足など）の動きを揺れものに同期させ、追従や貫通対策ができます（SyncBone）
+- Blueprint・C++から、実行中にパラメータや外力を動的に制御できます
 
 ### 参考資料
 物理挙動を実装するにあたって、以下の資料を参考にしました。
 - [次期アイドルマスター グラフィクス＆アニメーション プログラミング プレビュー](https://cedil.cesa.or.jp/cedil_sessions/view/416)
 
-## 🚀 導入方法 (Getting Started)
+## 導入方法
 
 ### 1. ダウンロード
 
@@ -84,18 +104,18 @@ C++ビルド環境がない方は、以下のリンクからプラグインを�
 
 > **Note:** Blueprintのみのプロジェクトでパッケージ化する際にエラーが出る場合があります。その際は、C++プロジェクトに変換するか、[こちらの記事](https://papersloth.hatenablog.com/entry/2024/02/14/201629)を参考にしてください。
 
-## 📚 ドキュメント & コミュニティ
+## ドキュメント＆コミュニティ
 
 - **[Wiki](https://github.com/pafuhana1213/KawaiiPhysics/wiki)**: 公式ドキュメント（整備中）
 - **[DeepWiki](https://deepwiki.com/pafuhana1213/KawaiiPhysics)**: AIによる自動生成ドキュメント
 - **[Discussions](https://github.com/pafuhana1213/KawaiiPhysics/discussions)**: 質問、要望、雑談などはこちらへ
 - **[Issues](https://github.com/pafuhana1213/KawaiiPhysics/issues)**: 不具合報告
 
-## 🎓 解説記事 & 動画 (Tutorials)
+## 解説記事・動画
 
 ### 公式
 
-- [揺れ骨用自作AnimNode「Kawaii Physics」の内部実装解説的なもの その1](http.pafuhana1213.hatenablog.com/entry/2019/07/26/171046)
+- [揺れ骨用自作AnimNode「Kawaii Physics」の内部実装解説的なもの その1](http://pafuhana1213.hatenablog.com/entry/2019/07/26/171046)
 - [#ControlRig を使ったスカートの突き抜け対策と#KawaiiPhysics を併用してみるテスト](https://twitter.com/pafuhana1213/status/1300454762542817280)
 
 ### 非公式 (ありがとうございます！)
@@ -108,7 +128,7 @@ C++ビルド環境がない方は、以下のリンクからプラグインを�
 - [５分でわかるKawaii Physicsの使い方！【UE5】【tutorial】](https://www.youtube.com/watch?v=TliP9vSxm4c)
 - [The Hidden Physics “Engine” Behind Unreal's Most Stylish Games ...](https://www.youtube.com/watch?v=9ThmoMHnHhw)
 
-## 🎮 サンプル (Sample)
+## サンプル
 
 <img src="https://github.com/user-attachments/assets/0d866ad2-f803-400b-bd23-2d46ab17b8ae" alt="sample2" width="640px">
 
@@ -120,31 +140,31 @@ C++ビルド環境がない方は、以下のリンクからプラグインを�
     - Copyright (c) 2025 株式会社TA All rights reserved
     - 利用規約：https://uzurig.com/ja/terms_of_use_jp/
 
-## 🌟 採用実績 (Showcase)
+## 採用実績
 
 多くのプロジェクトで採用されています！
 - **[採用実績一覧](https://github.com/pafuhana1213/KawaiiPhysics/wiki/%E6%8E%A1%E7%94%A8%E5%AE%9F%E7%B8%BE-Adoption)**
 - あなたの作品もぜひ [こちら](https://github.com/pafuhana1213/KawaiiPhysics/discussions/65) で教えてください！
 - Twitter/Xで作品を共有する際は、ぜひハッシュタグ **[#KawaiiPhysics](https://twitter.com/search?q=%23kawaiiphysics&src=typed_query&f=live)** をお使いください！
 
-## 関連ツール(Related tools)
+## 関連ツール
 - [VRM SpringBoneをKawaiiPhysicsに変換するツール](https://yumetengu.booth.pm/items/7943387)
 
-## 📜 ライセンス (License)
+## ライセンス
 
 [MIT License](https://github.com/pafuhana1213/KawaiiPhysics/blob/master/LICENSE)
 
-## 👨‍💻 作者 (Author)
+## 作者
 
 [おかず @pafuhana1213](https://twitter.com/pafuhana1213)
 
-## 📅 更新履歴 (Changelog)
+## 更新履歴
 
 [Announcements - アナウンス](https://github.com/pafuhana1213/KawaiiPhysics/discussions/categories/announcements-%E3%82%A2%E3%83%8A%E3%82%A6%E3%83%B3%E3%82%B9)
 
 ---
 
-## ✨ よろしければご支援を！
+## よろしければご支援を！
 
 このプラグインが、皆さんのUEプロジェクトに少しでも役立っていれば、とても嬉しいです。
 

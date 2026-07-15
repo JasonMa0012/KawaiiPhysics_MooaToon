@@ -25,6 +25,11 @@ FString UAnimNotify_KawaiiPhysicsAddExternalForce::GetNotifyName_Implementation(
 void UAnimNotify_KawaiiPhysicsAddExternalForce::Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
                                                        const FAnimNotifyEventReference& EventReference)
 {
+	if (!MeshComp)
+	{
+		return;
+	}
+
 	UKawaiiPhysicsLibrary::AddExternalForcesToComponent(MeshComp, AdditionalExternalForces, this,
 	                                                    FilterTags, bFilterExactMatch, true);
 

@@ -86,12 +86,44 @@ FText UAnimGraphNode_KawaiiPhysics::GetNodeTitle(ENodeTitleType::Type TitleType)
 	return CachedNodeTitles[TitleType];
 }
 
+void UAnimGraphNode_KawaiiPhysics::EnsureUniqueCollisionGuids()
+{
+	// コリジョン配列のGuidを一意化する（複製/貼り付けでGuidごとコピーされ重複しうるため）。
+	TSet<FGuid> SeenGuids;
+	auto Dedup = [&SeenGuids](auto& Limits)
+	{
+		for (auto& Limit : Limits)
+		{
+			if (!Limit.Guid.IsValid() || SeenGuids.Contains(Limit.Guid))
+			{
+				Limit.Guid = FGuid::NewGuid();
+			}
+			SeenGuids.Add(Limit.Guid);
+		}
+	};
+	Dedup(Node.SphericalLimits);
+	Dedup(Node.CapsuleLimits);
+	Dedup(Node.BoxLimits);
+	Dedup(Node.PlanarLimits);
+}
+
 void UAnimGraphNode_KawaiiPhysics::PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
+	// 複製/貼り付け等でGuidが重複しうるため一意化する（EditModeのGuid削除が誤削除しないように）
+	EnsureUniqueCollisionGuids();
+
 	Node.ModifyBones.Empty();
 	ReconstructNode();
+}
+
+void UAnimGraphNode_KawaiiPhysics::PostLoad()
+{
+	Super::PostLoad();
+
+	// 本修正以前に複製された古いデータが重複Guidを持つ場合に備え、ロード時にも一意化する
+	EnsureUniqueCollisionGuids();
 }
 
 FEditorModeID UAnimGraphNode_KawaiiPhysics::GetEditorMode() const
@@ -130,7 +162,6 @@ void UAnimGraphNode_KawaiiPhysics::CopyNodeDataToPreviewNode(FAnimNode_Base* Ani
 	KawaiiPhysics->ExcludeBones = Node.ExcludeBones;
 	KawaiiPhysics->AdditionalRootBones = Node.AdditionalRootBones;
 	KawaiiPhysics->TargetFramerate = Node.TargetFramerate;
-	KawaiiPhysics->OverrideTargetFramerate = Node.OverrideTargetFramerate;
 
 	// Physics Settings
 	KawaiiPhysics->PhysicsSettings = Node.PhysicsSettings;
@@ -146,6 +177,11 @@ void UAnimGraphNode_KawaiiPhysics::CopyNodeDataToPreviewNode(FAnimNode_Base* Ani
 
 	// DummyBone
 	KawaiiPhysics->DummyBoneLength = Node.DummyBoneLength;
+	KawaiiPhysics->BoneSubdivisionCount = Node.BoneSubdivisionCount;
+	KawaiiPhysics->bBoneSubdivisionCollisionOnly = Node.bBoneSubdivisionCollisionOnly;
+	KawaiiPhysics->bBoneSubdivisionDensifyByRadius = Node.bBoneSubdivisionDensifyByRadius;
+	KawaiiPhysics->BoneConstraintSubdivisionCount = Node.BoneConstraintSubdivisionCount;
+	KawaiiPhysics->BoneConstraintSubdivisionFeedbackScale = Node.BoneConstraintSubdivisionFeedbackScale;
 	KawaiiPhysics->BoneForwardAxis = Node.BoneForwardAxis;
 
 	// Limits
@@ -156,14 +192,31 @@ void UAnimGraphNode_KawaiiPhysics::CopyNodeDataToPreviewNode(FAnimNode_Base* Ani
 	KawaiiPhysics->LimitsDataAsset = Node.LimitsDataAsset;
 	KawaiiPhysics->PhysicsAssetForLimits = Node.PhysicsAssetForLimits;
 
+	// Shared Collision
+	if (KawaiiPhysics->bSharedCollisionSource != Node.bSharedCollisionSource ||
+		KawaiiPhysics->bUseSharedCollision != Node.bUseSharedCollision ||
+		KawaiiPhysics->SharedCollisionGroupTag != Node.SharedCollisionGroupTag)
+	{
+		KawaiiPhysics->RequestSharedCollisionReinit();
+	}
+	KawaiiPhysics->bSharedCollisionSource = Node.bSharedCollisionSource;
+	KawaiiPhysics->bUseSharedCollision = Node.bUseSharedCollision;
+	KawaiiPhysics->SharedCollisionGroupTag = Node.SharedCollisionGroupTag;
+
 	// ExternalForce
 	KawaiiPhysics->Gravity = Node.Gravity;
+	KawaiiPhysics->bUseLegacyGravity = Node.bUseLegacyGravity;
+	KawaiiPhysics->bUseDefaultGravityZProjectSetting = Node.bUseDefaultGravityZProjectSetting;
+	KawaiiPhysics->bUseWorldSpaceGravity = Node.bUseWorldSpaceGravity;
+	KawaiiPhysics->SimpleExternalForce = Node.SimpleExternalForce;
+	KawaiiPhysics->bUseWorldSpaceSimpleExternalForce = Node.bUseWorldSpaceSimpleExternalForce;
 	KawaiiPhysics->ExternalForces = Node.ExternalForces;
 	KawaiiPhysics->CustomExternalForces = Node.CustomExternalForces;
 
 	// Wind
 	KawaiiPhysics->bEnableWind = Node.bEnableWind;
 	KawaiiPhysics->WindScale = Node.WindScale;
+	KawaiiPhysics->WindDirectionNoiseAngle = Node.WindDirectionNoiseAngle;
 
 	// BoneConstraint
 	KawaiiPhysics->BoneConstraintGlobalComplianceType = Node.BoneConstraintGlobalComplianceType;
@@ -398,17 +451,20 @@ void UAnimGraphNode_KawaiiPhysics::CustomizeDetails(IDetailLayoutBuilder& Detail
 
 		// Basic
 		SafeSetOrder(FName("Bones"));
+		SafeSetOrder(FName("Bones|Bone Subdivision"));
 		SafeSetOrder(FName("Physics Settings"));
-		SafeSetOrder(FName("Physics Settings Advanced"));
+		SafeSetOrder(FName("Physics Settings|Curves"));
 
 		// Limits
 		SafeSetOrder(FName("Limits"));
-		SafeSetOrder(FName("Bone Constraint"));
+		SafeSetOrder(FName("Limits|Bone Constraint"));
+		SafeSetOrder(FName("Limits|Shared Collision"));
+		SafeSetOrder(FName("Limits|World Collision"));
 
-		// Other
-		SafeSetOrder(FName("Sync Bone"));
-		SafeSetOrder(FName("World Collision"));
-		SafeSetOrder(FName("ExternalForce"));
+		// Force
+		SafeSetOrder(FName("Force"));
+		SafeSetOrder(FName("Force|External Force"));
+		SafeSetOrder(FName("Force|Sync Bone"));
 
 		// AnimNode
 		SafeSetOrder(FName("Tag"));

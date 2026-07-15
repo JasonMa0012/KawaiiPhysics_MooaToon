@@ -22,6 +22,7 @@ class UAnimGraphNode_KawaiiPhysics : public UAnimGraphNode_SkeletalControlBase
 
 	// UObject interface
 	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual void PostLoad() override;
 
 protected:
 	// UAnimGraphNode_Base interface
@@ -33,7 +34,6 @@ protected:
 	virtual void CustomizeDetails(IDetailLayoutBuilder& DetailBuilder) override;
 	// End of UAnimGraphNode_Base interface
 
-	//virtual FText GetControllerDescription() const override;
 	virtual FText GetControllerDescription() const override;
 	virtual const FAnimNode_SkeletalControlBase* GetNode() const override { return &Node; }
 	// End of UAnimGraphNode_SkeletalControlBase interface
@@ -47,6 +47,9 @@ protected:
 	virtual void CustomizeDetailDebugVisualizations(IDetailLayoutBuilder& DetailBuilder);
 
 private:
+	/** コリジョン配列のGuidを一意化する（複製/貼り付け/旧データの重複Guidを再発番） */
+	void EnsureUniqueCollisionGuids();
+
 	/** Creates the export data asset path. */
 	void CreateExportDataAssetPath(FString& PackageName, const FString& DefaultSuffix) const;
 

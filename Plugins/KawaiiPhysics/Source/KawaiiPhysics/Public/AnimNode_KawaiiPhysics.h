@@ -6,30 +6,31 @@
 #include "BoneContainer.h"
 #include "BonePose.h"
 #include "GameplayTagContainer.h"
-
 #include "BoneControllers/AnimNode_AnimDynamics.h"
 #include "BoneControllers/AnimNode_SkeletalControlBase.h"
+#include "Engine/HitResult.h"
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 5
+#if !UE_VERSION_OLDER_THAN(5, 5, 0)
 #include "StructUtils/InstancedStruct.h"
 #else
 #include "InstancedStruct.h"  
 #endif
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 6
+#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/BodyInstance.h"
 #endif
 
 #include "KawaiiPhysicsSyncBone.h"
+#include "KawaiiPhysicsCollisionLimits.h"
 #include "KawaiiPhysicsSharedCollisionSubsystem.h"
+#include "KawaiiPhysicsTypes.h"
+#include "KawaiiPhysicsBoneConstraintTypes.h"
 #include "AnimNode_KawaiiPhysics.generated.h"
 
 class UKawaiiPhysics_CustomExternalForce;
 class UKawaiiPhysicsLimitsDataAsset;
 class UKawaiiPhysicsBoneConstraintsDataAsset;
-struct FKawaiiPhysicsSharedCollisionEntry;
-struct FKawaiiPhysicsSharedCollisionSourceSlot;
 
 #if ENABLE_ANIM_DEBUG
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsEnable;
@@ -39,520 +40,6 @@ extern KAWAIIPHYSICS_API TAutoConsoleVariable<float> CVarAnimNodeKawaiiPhysicsDe
 #endif
 
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsUseBoneContainerRefSkeletonWhenInit;
-
-UENUM(BlueprintType)
-enum class EKawaiiPhysicsSimulationSpace : uint8
-{
-	/** Simulate in component space */
-	ComponentSpace,
-	/** Simulate in world space. This fixes the issues of root bones moving suddenly */
-	WorldSpace,
-	/** Simulate in another bone space */
-	BaseBoneSpace,
-};
-
-/**
- * Enum representing the planar constraint axis in KawaiiPhysics.
- */
-UENUM(meta=(ScriptName = "KP_PlanarConstraint"))
-enum class EPlanarConstraint : uint8
-{
-	/** No planar constraint */
-	None,
-	/** Constrain to the X axis */
-	X,
-	/** Constrain to the Y axis */
-	Y,
-	/** Constrain to the Z axis */
-	Z,
-};
-
-/**
- * Enum representing the forward axis of a bone in KawaiiPhysics.
- */
-UENUM()
-enum class EBoneForwardAxis : uint8
-{
-	X_Positive,
-	X_Negative,
-	Y_Positive,
-	Y_Negative,
-	Z_Positive,
-	Z_Negative,
-};
-
-/**
- * Enum representing the type of collision limit in KawaiiPhysics.
- */
-UENUM()
-enum class ECollisionLimitType : uint8
-{
-	None,
-	Spherical,
-	Capsule,
-	Box,
-	Planar,
-};
-
-/**
- * Enum representing the source type of the collision limit in KawaiiPhysics.
- */
-UENUM()
-enum class ECollisionSourceType : uint8
-{
-	/** Use the value set in the AnimNode */
-	AnimNode,
-	/** Use the value set in the DataAsset */
-	DataAsset,
-	/** Use the value set in the PhysicsAsset */
-	PhysicsAsset,
-};
-
-/**
- * Base structure for defining collision limits in KawaiiPhysics.
- */
-USTRUCT()
-struct FCollisionLimitBase
-{
-	GENERATED_BODY()
-
-	/** Bone to attach the sphere to */
-	UPROPERTY(EditAnywhere, Category = CollisionLimitBase)
-	FBoneReference DrivingBone;
-
-	/** Offset location from the driving bone */
-	UPROPERTY(EditAnywhere, Category = CollisionLimitBase)
-	FVector OffsetLocation = FVector::ZeroVector;
-
-	/** Offset rotation from the driving bone */
-	UPROPERTY(EditAnywhere, Category = CollisionLimitBase, meta = (ClampMin = "-360", ClampMax = "360"))
-	FRotator OffsetRotation = FRotator::ZeroRotator;
-
-	/** Location of the collision limit */
-	UPROPERTY()
-	FVector Location = FVector::ZeroVector;
-
-	/** Rotation of the collision limit */
-	UPROPERTY()
-	FQuat Rotation = FQuat::Identity;
-
-	/** Whether the collision limit is enabled */
-	UPROPERTY()
-	bool bEnable = true;
-
-	/** Source type of the collision limit */
-	UPROPERTY(VisibleAnywhere, Category = CollisionLimitBase)
-	ECollisionSourceType SourceType = ECollisionSourceType::AnimNode;
-
-#if WITH_EDITORONLY_DATA
-
-	/** Unique identifier for the collision limit (editor only) */
-	UPROPERTY(VisibleAnywhere, Category = Debug, meta = (IgnoreForMemberInitializationTest))
-	FGuid Guid = FGuid::NewGuid();
-
-	/** Type of the collision limit (editor only) */
-	UPROPERTY()
-	ECollisionLimitType Type = ECollisionLimitType::None;
-
-#endif
-
-	/** Assignment operator */
-	FCollisionLimitBase& operator=(const FCollisionLimitBase& Other)
-	{
-		DrivingBone = Other.DrivingBone;
-		OffsetLocation = Other.OffsetLocation;
-		OffsetRotation = Other.OffsetRotation;
-		Location = Other.Location;
-		Rotation = Other.Rotation;
-		bEnable = Other.bEnable;
-		SourceType = Other.SourceType;
-#if WITH_EDITORONLY_DATA
-		Guid = Other.Guid;
-		Type = Other.Type;
-#endif
-		return *this;
-	}
-};
-
-/**
- * Structure representing a spherical limit for collision in KawaiiPhysics.
- */
-USTRUCT(BlueprintType)
-struct FSphericalLimit : public FCollisionLimitBase
-{
-	GENERATED_BODY()
-
-	/** Default constructor */
-	FSphericalLimit()
-	{
-#if WITH_EDITORONLY_DATA
-		// Set the collision limit type to spherical
-		Type = ECollisionLimitType::Spherical;
-#endif
-	}
-
-	/** Radius of the sphere */
-	UPROPERTY(EditAnywhere, Category = SphericalLimit, meta = (ClampMin = "0"))
-	float Radius = 5.0f;
-
-	/** Whether to lock bodies inside or outside of the sphere */
-	UPROPERTY(EditAnywhere, Category = SphericalLimit)
-	ESphericalLimitType LimitType = ESphericalLimitType::Outer;
-
-	/** Assignment operator */
-	FSphericalLimit& operator=(const FSphericalLimit& Other)
-	{
-		FCollisionLimitBase::operator=(Other);
-		Radius = Other.Radius;
-		LimitType = Other.LimitType;
-		return *this;
-	}
-};
-
-/**
- * Structure representing a capsule limit for collision in KawaiiPhysics.
- */
-USTRUCT(BlueprintType)
-struct FCapsuleLimit : public FCollisionLimitBase
-{
-	GENERATED_BODY()
-
-	/** Default constructor */
-	FCapsuleLimit()
-	{
-#if WITH_EDITORONLY_DATA
-		// Set the collision limit type to capsule
-		Type = ECollisionLimitType::Capsule;
-#endif
-	}
-
-	/** Radius of the capsule */
-	UPROPERTY(EditAnywhere, Category = CapsuleLimit, meta = (ClampMin = "0"))
-	float Radius = 5.0f;
-
-	/** Length of the capsule */
-	UPROPERTY(EditAnywhere, Category = CapsuleLimit, meta = (ClampMin = "0"))
-	float Length = 10.0f;
-
-	/** Assignment operator */
-	FCapsuleLimit& operator=(const FCapsuleLimit& Other)
-	{
-		FCollisionLimitBase::operator=(Other);
-		Radius = Other.Radius;
-		Length = Other.Length;
-		return *this;
-	}
-};
-
-/**
- * Structure representing a box limit for collision in KawaiiPhysics.
- */
-USTRUCT(BlueprintType)
-struct FBoxLimit : public FCollisionLimitBase
-{
-	GENERATED_BODY()
-
-	/** Default constructor */
-	FBoxLimit()
-	{
-#if WITH_EDITORONLY_DATA
-		// Set the collision limit type to box
-		Type = ECollisionLimitType::Box;
-#endif
-	}
-
-	/** The extent of the box defining the box limit */
-	UPROPERTY(EditAnywhere, Category = BoxLimit)
-	FVector Extent = FVector(5.0f, 5.0f, 5.0f);
-
-	/** Assignment operator */
-	FBoxLimit& operator=(const FBoxLimit& Other)
-	{
-		FCollisionLimitBase::operator=(Other);
-		Extent = Other.Extent;
-		return *this;
-	}
-};
-
-/**
- * Structure representing a planar limit for collision in KawaiiPhysics.
- */
-USTRUCT(BlueprintType)
-struct FPlanarLimit : public FCollisionLimitBase
-{
-	GENERATED_BODY()
-
-	/** Default constructor */
-	FPlanarLimit()
-	{
-#if WITH_EDITORONLY_DATA
-		// Set the collision limit type to planar
-		Type = ECollisionLimitType::Planar;
-#endif
-	}
-
-	/** The plane defining the planar limit */
-	UPROPERTY()
-	FPlane Plane = FPlane(0, 0, 0, 0);
-
-	/** Assignment operator */
-	FPlanarLimit& operator=(const FPlanarLimit& Other)
-	{
-		FCollisionLimitBase::operator=(Other);
-		Plane = Other.Plane;
-		return *this;
-	}
-};
-
-/**
- * Structure representing the root bone settings for KawaiiPhysics.
- */
-USTRUCT(BlueprintType)
-struct KAWAIIPHYSICS_API FKawaiiPhysicsRootBoneSetting
-{
-	GENERATED_BODY()
-
-	/** 
-	* 指定ボーンとそれ以下のボーンを制御対象に
-	* Control the specified bone and the bones below it
-	*/
-	UPROPERTY(EditAnywhere, Category = "Bones")
-	FBoneReference RootBone;
-
-	/** 
-	* 指定したボーンとそれ以下のボーンを制御対象から除去
-	* Do NOT control the specified bone and the bones below it
-	*/
-	UPROPERTY(EditAnywhere, Category = "Bones", meta = (EditCondition = "bUseOverrideExcludeBones"))
-	TArray<FBoneReference> OverrideExcludeBones;
-	UPROPERTY(EditAnywhere, Category = "Bones", meta = (InlineEditConditionToggle))
-	bool bUseOverrideExcludeBones = false;
-};
-
-
-/**
- * Structure representing the settings for KawaiiPhysics.
- */
-USTRUCT(BlueprintType)
-struct KAWAIIPHYSICS_API FKawaiiPhysicsSettings
-{
-	GENERATED_BODY()
-
-	/** 
-	* 減衰度：揺れの強さを制御。値が小さいほど、加速度を物理挙動に反映
-	* Damping physical behavior. As the value is smaller, the acceleration is more reflected to the physical behavior
-	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0"), category = "KawaiiPhysics")
-	float Damping = 0.1f;
-
-	/** 
-	* 剛性度：値が大きいほど、元の形状を維持
-	* Stiffness of physical behavior.As the value is larger, pre-physics shape is more respected
-	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0"), category = "KawaiiPhysics")
-	float Stiffness = 0.05f;
-
-	/** 
-	* ワールド座標系におけるSkeletal Mesh Componentの移動量の反映度
-	* Influence from movement in world coordinate system of Skeletal Mesh Component
-	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0"), category = "KawaiiPhysics")
-	float WorldDampingLocation = 0.8f;
-
-	/** 
-	* ワールド座標系におけるSkeletal Mesh Componentの回転量の反映度
-	* Influence from rotation in world coordinate system of Skeletal Mesh Component
-	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0"), category = "KawaiiPhysics")
-	float WorldDampingRotation = 0.8f;
-
-	/** 
-	* 各ボーンのコリジョン半径
-	* Radius of bone's collision
-	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", DisplayName="Collision Radius"),
-		category = "KawaiiPhysics")
-	float Radius = 3.0f;
-
-	/** 
-	* 物理挙動による回転制限。適切に設定することで荒ぶりを抑制
-	* Rotational limitations in physical behavior. Setting the value properly can prevent rampage
-	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0"), category = "KawaiiPhysics")
-	float LimitAngle = 0.0f;
-};
-
-/**
- * Structure representing a bone that can be modified by the KawaiiPhysics system.
- */
-USTRUCT(BlueprintType)
-struct KAWAIIPHYSICS_API FKawaiiPhysicsModifyBone
-{
-	GENERATED_USTRUCT_BODY()
-
-	/** Reference to the bone */
-	UPROPERTY()
-	FBoneReference BoneRef;
-
-	/** Index of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	int32 Index = -1;
-
-	/** Index of the parent bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	int32 ParentIndex = -1;
-
-	/** Indices of the child bones */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	TArray<int32> ChildIndices;
-
-	/** Physics settings for the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	FKawaiiPhysicsSettings PhysicsSettings;
-
-	/** Current location of the bone */
-	UPROPERTY(BlueprintReadWrite, Category = "KawaiiPhysics|ModifyBone")
-	FVector Location = FVector::ZeroVector;
-
-	/** Previous location of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	FVector PrevLocation = FVector::ZeroVector;
-
-	/** Previous rotation of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	FQuat PrevRotation = FQuat::Identity;
-
-	/** Pose location of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	FVector PoseLocation = FVector::ZeroVector;
-
-	/** Pose rotation of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	FQuat PoseRotation = FQuat::Identity;
-
-	/** Pose scale of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	FVector PoseScale = FVector::OneVector;
-
-	/** Length of the bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	float BoneLength = 0.0f;
-
-	/** Length from the root bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	float LengthFromRoot = 0.0f;
-
-	/** Length rate from the root bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	float LengthRateFromRoot = 0.0f;
-
-	/** Flag indicating if this is a dummy bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	bool bDummy = false;
-
-	/** Flag indicating if simulation should be skipped for this bone */
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics|ModifyBone")
-	bool bSkipSimulate = false;
-
-	/**
-	 * Checks if the bone has a parent.
-	 *
-	 * @return True if the bone has a parent, false otherwise.
-	 */
-	bool HasParent() const { return ParentIndex >= 0; }
-
-	/** Default constructor */
-	FKawaiiPhysicsModifyBone()
-	{
-	}
-};
-
-UENUM()
-enum class EXPBDComplianceType : uint8
-{
-	Concrete UMETA(DisplayName = "Concrete"),
-	Wood UMETA(DisplayName = "Wood"),
-	Leather UMETA(DisplayName = "Leather"),
-	Tendon UMETA(DisplayName = "Tendon"),
-	Rubber UMETA(DisplayName = "Rubber"),
-	Muscle UMETA(DisplayName = "Muscle"),
-	Fat UMETA(DisplayName = "Fat"),
-};
-
-/**
- * Structure representing a constraint between two bones for the KawaiiPhysics system.
- */
-USTRUCT()
-struct FModifyBoneConstraint
-{
-	GENERATED_BODY()
-
-	FModifyBoneConstraint()
-	{
-	}
-
-	/** The first bone reference in the constraint */
-	UPROPERTY(EditAnywhere, category = "KawaiiPhysics")
-	FBoneReference Bone1;
-
-	/** The second bone reference in the constraint */
-	UPROPERTY(EditAnywhere, category = "KawaiiPhysics")
-	FBoneReference Bone2;
-
-	/** Flag to override the compliance type */
-	UPROPERTY(EditAnywhere, category = "KawaiiPhysics", meta=(InlineEditConditionToggle))
-	bool bOverrideCompliance = false;
-
-	/** The compliance type to use if overridden */
-	UPROPERTY(EditAnywhere, category = "KawaiiPhysics", meta=(EditCondition="bOverrideCompliance"))
-	EXPBDComplianceType ComplianceType = EXPBDComplianceType::Leather;
-
-	/** Index of the first modify bone */
-	UPROPERTY()
-	int32 ModifyBoneIndex1 = -1;
-
-	/** Index of the second modify bone */
-	UPROPERTY()
-	int32 ModifyBoneIndex2 = -1;
-
-	/** Length of the constraint */
-	UPROPERTY()
-	float Length = -1.0f;
-
-	/** Flag indicating if this is a dummy constraint */
-	UPROPERTY()
-	bool bIsDummy = false;
-
-	/** Lambda value for the constraint */
-	UPROPERTY()
-	float Lambda = 0.0f;
-
-	/** Equality operator to compare two constraints */
-	FORCEINLINE bool operator ==(const FModifyBoneConstraint& Other) const
-	{
-		return ((Bone1 == Other.Bone1 && Bone2 == Other.Bone2) || (Bone1 == Other.Bone2 && Bone2 == Other.Bone1)) &&
-			ComplianceType == Other.ComplianceType;
-	}
-
-	/** Initializes the bone references with the required bones */
-	void InitializeBone(const FBoneContainer& RequiredBones)
-	{
-		Bone1.Initialize(RequiredBones);
-		Bone2.Initialize(RequiredBones);
-	}
-
-	/** Checks if the bone references are valid */
-	bool IsBoneReferenceValid() const
-	{
-		return ModifyBoneIndex1 >= 0 && ModifyBoneIndex2 >= 0;
-	}
-
-	/** Checks if the constraint is valid */
-	bool IsValid() const
-	{
-		return Length > 0.0f;
-	}
-};
 
 USTRUCT(BlueprintType)
 struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalControlBase
@@ -587,7 +74,57 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones", meta = (PinHiddenByDefault, ClampMin = "0"))
 	float DummyBoneLength = 0.0f;
 
-	/** 
+	/**
+	* 隣接するボーン間に挿入するダミーボーンの最小分割数。コリジョン検出の精度を向上させる（例: スカートの足貫通防止）。0で無効。
+	* bBoneSubdivisionDensifyByRadius が有効なときは、これを最小として半径に応じ追加配置される。
+	* Minimum number of DummyBone subdivisions to insert between adjacent physics bones.
+	* Improves collision detection (e.g., prevents skirts from penetrating legs). Set to 0 to disable.
+	* When bBoneSubdivisionDensifyByRadius is enabled, this acts as a floor and more are added based on radius.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones|Bone Subdivision", meta = (PinHiddenByDefault, ClampMin = "0", ClampMax = "10"))
+	int32 BoneSubdivisionCount = 0;
+
+	/**
+	* ボーン間ダミーボーンの速度積分（重力・風など）をスキップし、実ボーン間の補間位置からコリジョン・制約に参加（配置数には影響しない）。
+	* When true, inter-bone dummy bones skip velocity integration (gravity/wind/etc.) and participate in collision and constraints from interpolated positions. Does not affect the number of dummies.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones|Bone Subdivision",
+		meta = (PinHiddenByDefault, EditCondition = "BoneSubdivisionCount > 0"))
+	bool bBoneSubdivisionCollisionOnly = true;
+
+	/**
+	* 半径に応じてダミーを追加配置し、コリジョン球でボーン間を概ね隙間なく被覆する。BoneSubdivisionCount を最小として、
+	* ボーン間が半径に対して離れている区間ほど多く配置する（近接区間は最小のまま。1区間あたり最大50本）。
+	* 有効中に Radius / RadiusCurve を変更した場合、ダミー数の再計算には再初期化（ABP再コンパイル等）が必要なことがある。
+	* Add dummies based on radius so collision spheres roughly cover the gap between bones. Uses BoneSubdivisionCount as the
+	* minimum and places more where bones are far apart relative to their radius (close segments keep the minimum; up to 50 per segment).
+	* While enabled, changing Radius / RadiusCurve may need a re-init (e.g. recompiling the ABP) for the dummy count to update.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones|Bone Subdivision",
+		meta = (PinHiddenByDefault, EditCondition = "BoneSubdivisionCount > 0"))
+	bool bBoneSubdivisionDensifyByRadius = false;
+
+	/**
+	* 横方向BoneConstraintに沿って挿入するコリジョン代理ダミーの分割数。隣接チェーン（列）間の隙間をコリジョン点で埋めて貫通を防ぐ。
+	* Number of collision-proxy dummies to insert along each horizontal BoneConstraint. Fills horizontal gaps between adjacent chains (columns) to prevent penetration.
+	* BoneSubdivisionCountと組み合わせると布面に2Dグリッド状のコリジョン点が並ぶ。0で無効。端点コリジョンが既に重なる接続(間隔<=2*半径)には挿入しない。BoneSubdivisionCountとは独立。
+	* Combine with BoneSubdivisionCount for a 2D grid of collision points. 0 to disable. Skipped where the endpoint collisions already overlap (spacing <= 2*radius). Independent of BoneSubdivisionCount.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones|Bone Subdivision",
+		meta = (PinHiddenByDefault, ClampMin = "0", ClampMax = "10"))
+	int32 BoneConstraintSubdivisionCount = 0;
+
+	/**
+	* bridge dummyが受けたコリジョン変位を端点ボーンへ転送する強さ。0=転送なし、1=端点との距離比に応じた標準的な押し出し。
+	* これにより列の間で動くコライダーが実ボーンを押し出せる（貫通防止フィードバックの本体）。剛性が強すぎる場合は下げる。
+	* Strength of transferring a bridge dummy's collision displacement to its endpoint bones (0 = none, 1 = standard
+	* push weighted by proximity). This is what lets a collider moving between columns actually push the real bones.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones|Bone Subdivision",
+		meta = (PinHiddenByDefault, ClampMin = "0.0", ClampMax = "2.0", UIMin = "0.0", UIMax = "2.0", EditCondition = "BoneConstraintSubdivisionCount > 0"))
+	float BoneConstraintSubdivisionFeedbackScale = 1.0f;
+
+	/**
 	* ボーンの前方。物理制御やダミーボーンの配置位置に影響
 	* Bone forward direction. Affects the placement of physical controls and dummy bones
 	*/
@@ -622,10 +159,8 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* ターゲットとなるフレームレート
 	* Target Frame Rate
 	*/
-	UPROPERTY(EditAnywhere, Category = "Physics Settings", meta = (EditCondition = "OverrideTargetFramerate"))
+	UPROPERTY(EditAnywhere, Category = "Physics Settings", meta = (ClampMin = "1", UIMin = "1"))
 	int32 TargetFramerate = 60;
-	UPROPERTY(EditAnywhere, Category = "Physics Settings", meta = (InlineEditConditionToggle))
-	bool OverrideTargetFramerate = false;
 
 	/** 
 	* 物理の空回し回数。物理処理が落ち着いてから開始・表示したい際に使用
@@ -699,7 +234,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/Damping parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
 		meta = (PinHiddenByDefault, DisplayName = "Damping Rate by Bone Length Rate"))
 	FRuntimeFloatCurve DampingCurveData;
 
@@ -709,7 +244,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/Stiffness parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
 		meta = (PinHiddenByDefault, DisplayName = "Stiffness Rate by Bone Length Rate"))
 	FRuntimeFloatCurve StiffnessCurveData;
 
@@ -718,8 +253,10 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* 「RootBoneから特定のボーンまでの長さ / RootBoneから末端のボーンまでの長さ」(0.0~1.0)の値におけるカーブの値を各パラメータに乗算
 	* Corrects the Physics Settings/WorldDampingLocation parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
+	* ※基となる値の意味は WorldDampingLocation を参照（大きいほど移動量を抑制 = 反映率は 1 - 値）
+	* Note: see WorldDampingLocation for the base value's meaning (higher = more suppression; reflection factor = 1 - value).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
 		meta = (PinHiddenByDefault, DisplayName = "World Damping Location Rate by Bone Length Rate"))
 	FRuntimeFloatCurve WorldDampingLocationCurveData;
 
@@ -728,8 +265,10 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* 「RootBoneから特定のボーンまでの長さ / RootBoneから末端のボーンまでの長さ」(0.0~1.0)の値におけるカーブの値を各パラメータに乗算
 	* Corrects the Physics Settings/WorldDampingRotation parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
+	* ※基となる値の意味は WorldDampingRotation を参照（大きいほど回転量を抑制 = 反映率は 1 - 値）
+	* Note: see WorldDampingRotation for the base value's meaning (higher = more suppression; reflection factor = 1 - value).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
 		meta = (PinHiddenByDefault, DisplayName = "World Damping Rotation Rate by Bone Length Rate"))
 	FRuntimeFloatCurve WorldDampingRotationCurveData;
 
@@ -739,7 +278,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/CollisionRadius parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
 		meta = (PinHiddenByDefault, DisplayName = "Radius Rate by Bone Length Rate"))
 	FRuntimeFloatCurve RadiusCurveData;
 
@@ -749,7 +288,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/LimitAngle parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
 		meta = (PinHiddenByDefault, DisplayName = "LimitAngle Rate by Bone Length Rate"))
 	FRuntimeFloatCurve LimitAngleCurveData;
 
@@ -786,8 +325,8 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	TObjectPtr<UKawaiiPhysicsLimitsDataAsset> LimitsDataAsset = nullptr;
 
 	/** 
-	* コリジョン設定（PhyiscsAsset版）。別AnimNode・ABPで設定を流用したい場合はこちらを推奨
-	* Collision settings (PhyiscsAsset版 version). This is recommended if you want to reuse the settings for another AnimNode or ABP.
+	* コリジョン設定（PhysicsAsset版）。別AnimNode・ABPで設定を流用したい場合はこちらを推奨
+	* Collision settings (PhysicsAsset). This is recommended if you want to reuse the settings for another AnimNode or ABP.
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits", meta = (PinHiddenByDefault))
 	TObjectPtr<UPhysicsAsset> PhysicsAssetForLimits = nullptr;
@@ -796,45 +335,47 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* コリジョン設定（DataAsset版）における球コリジョンのプレビュー
 	* Preview of sphere collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
 	TArray<FSphericalLimit> SphericalLimitsData;
 	/** 
 	* コリジョン設定（DataAsset版）におけるカプセルコリジョンのプレビュー
 	* Preview of capsule collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
 	TArray<FCapsuleLimit> CapsuleLimitsData;
 	/** 
 	* コリジョン設定（DataAsset版）におけるボックスコリジョンのプレビュー
 	* Preview of box collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
 	TArray<FBoxLimit> BoxLimitsData;
 	/** 
 	* コリジョン設定（DataAsset版）における平面コリジョンのプレビュー
 	* Preview of planar collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
 	TArray<FPlanarLimit> PlanarLimitsData;
 
 	/**
-	 * コリジョンを他のKawaiiPhysicsに共有する
-	 * Provide this node's collision limits as a source to other KawaiiPhysics nodes via SharedCollisionSubsystem
+	 * コリジョンを同じActor/ChildActorファミリー内のKawaiiPhysicsに共有する
+	 * Provide this node's collision limits to KawaiiPhysics nodes in the same attached actor family
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Shared Collision", meta = (PinHiddenByDefault))
 	bool bSharedCollisionSource = false;
 
 	/**
-	 * 他のKawaiiPhysicsから共有コリジョンを使用する
-	 * Use shared collision limits from source KawaiiPhysics nodes
+	 * 同じActor/ChildActorファミリー内のKawaiiPhysicsから共有コリジョンを使用する
+	 * 同じAnimGraph内で同一フレームの結果を使うには、SourceノードをTargetノードより先に評価される位置へ配置してください。
+	 * Use shared collision limits from source KawaiiPhysics nodes in the same attached actor family.
+	 * To use same-frame data in one AnimGraph, place the source node so it evaluates before the target node.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Shared Collision",
 		meta = (PinHiddenByDefault, EditCondition = "!bSharedCollisionSource"))
 	bool bUseSharedCollision = false;
 
 	/**
-	 * 共有コリジョンのグループタグ（Source/Target両方で使用）
-	 * Group tag for shared collision (used by both source and target)
+	 * 共有コリジョンのグループタグ（同じActor/ChildActorファミリー内のSource/Target両方で使用）
+	 * Group tag for shared collision (used by both source and target in the same attached actor family)
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Shared Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bSharedCollisionSource || bUseSharedCollision"))
@@ -842,34 +383,36 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 
 	/** 共有コリジョンの再初期化を要求 / Request shared collision reinitialization */
 	void RequestSharedCollisionReinit() { bSharedCollisionNeedsReinit = true; }
+	/** ボーン構造に依存する設定変更後の再初期化を要求 / Request modify-bone rebuild after topology-affecting settings change */
+	void RequestModifyBonesReinit() { bModifyBonesNeedsReinit = true; }
 
 	/**
 	* Bone Constraintで用いる剛性タイプ
 	* Stiffness type to use in Bone Constraint
 	* http://blog.mmacklin.com/2016/10/12/xpbd-slides-and-stiffness/
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	EXPBDComplianceType BoneConstraintGlobalComplianceType = EXPBDComplianceType::Leather;
 	/** 
 	* Bone Constraintの処理回数（コリジョン処理前）
 	* Number of Bone Constraints processed before collision processing
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	int32 BoneConstraintIterationCountBeforeCollision = 1;
 	/** 
 	* Bone Constraintの処理回数（コリジョン処理後）
 	* Number of Bone Constraints processed after collision processing
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	int32 BoneConstraintIterationCountAfterCollision = 1;
 	/** 
 	* 末端ボーンをBoneConstraint処理の対象にした場合、自動的にダミーボーンも処理対象にするフラグ
 	* Flag to automatically processes dummy bones when the end bones are subject to BoneConstraint processing.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	bool bAutoAddChildDummyBoneConstraint = true;
 
@@ -877,14 +420,14 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* BoneConstraint処理の対象となるボーンのペアを設定。スカートのように、ボーン間の距離を維持したい場合に使用
 	* Sets the bone pair to be processed by BoneConstraint. Used when you want to maintain the distance between bones, such as a skirt.
 	*/
-	UPROPERTY(EditAnywhere, Category = "Bone Constraint", meta=(TitleProperty="{Bone1} - {Bone2}"))
+	UPROPERTY(EditAnywhere, Category = "Limits|Bone Constraint", meta=(TitleProperty="{Bone1} - {Bone2}"))
 	TArray<FModifyBoneConstraint> BoneConstraints;
 
 	/** 
 	* BoneConstraint処理の対象となるボーンのペアを設定 (DataAsset版）。別AnimNode・ABPで設定を流用したい場合はこちらを推奨
 	* Set the bone pairs to be processed by BoneConstraint (DataAsset version). If you want to reuse the settings for another AnimNode or another ABP, this is recommended.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	TObjectPtr<UKawaiiPhysicsBoneConstraintsDataAsset> BoneConstraintsDataAsset;
 
@@ -892,24 +435,26 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* BoneConstraint処理の対象となるボーンのペアのプレビュー
 	* Preview of bone pairs that will be processed by BoneConstraint
 	*/
-	UPROPERTY(VisibleAnywhere, Category = "Bone Constraint", AdvancedDisplay,
+	UPROPERTY(Transient, VisibleAnywhere, Category = "Limits|Bone Constraint", AdvancedDisplay,
 		meta=(TitleProperty="{Bone1} - {Bone2}"))
 	TArray<FModifyBoneConstraint> BoneConstraintsData;
-	UPROPERTY()
+	// ランタイムキャッシュ(BoneConstraints + BoneConstraintsData)。InitBoneConstraints で再構築されるため非シリアライズ。
+	// Runtime cache rebuilt in InitBoneConstraints; not serialized.
+	UPROPERTY(Transient)
 	TArray<FModifyBoneConstraint> MergedBoneConstraints;
 
 	/**
 	* 同期元のボーンの移動・回転を物理制御下のボーンに適用します。スカートが足などを貫通するのを防ぐのに役立ちます
 	* Applies the movement and rotation of the sync source bone to the bone under physics control. Helps prevent skirts from penetrating legs, etc.
 	*/
-	UPROPERTY(EditAnywhere, Category = "Sync Bone", meta=(TitleProperty="{Bone}"))
+	UPROPERTY(EditAnywhere, Category = "Force|Sync Bone", meta=(TitleProperty="{Bone}"))
 	TArray<FKawaiiPhysicsSyncBone> SyncBones;
 
 	/**
 	* 重力
 	* Gravity
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force",
 		meta = (PinHiddenByDefault))
 	FVector Gravity = FVector::ZeroVector;
 
@@ -921,33 +466,31 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* true : Legacy compatibility (add 0.5 * Gravity * dt^2 to position)
 	* false: AnimDynamics compatibility (add Gravity * dt to velocity before updating position)
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force", meta = (PinHiddenByDefault))
 	bool bUseLegacyGravity = false;
 
 	/**
 	* Gravityベクトルにプロジェクト設定の DefaultGravityZ（絶対値）を乗算する処理のフラグ
 	* Flag to multiply the DefaultGravityZ (absolute value) of the project settings to the Gravity vector
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force", meta = (PinHiddenByDefault))
 	bool bUseDefaultGravityZProjectSetting = false;
 
-	// 
 	// 重力をワールド座標系で扱うかどうかのフラグ
 	// Flag to handle gravity in world coordinate system
-	//
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force", meta = (PinHiddenByDefault))
 	bool bUseWorldSpaceGravity = true;
 
 	// 外力としてWindDirectionalSourceの影響を受けるかどうかのフラグ
 	// Flag to receive the influence of WindDirectionalSource as an external force
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force", meta = (PinHiddenByDefault))
 	bool bEnableWind = false;
 
 	/** 
 	* WindDirectionalSourceによる風の影響度。ClothやSpeedTreeとの併用目的
 	* Influence of wind by WindDirectionalSource. For use with Cloth and SpeedTree
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force",
 		meta = (EditCondition = "bEnableWind", PinHiddenByDefault))
 	float WindScale = 1.0f;
 
@@ -955,19 +498,19 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
     * WindDirectionalSourceによる風方向に与えるノイズ（角度）
     * Noise(Degree) of wind by WindDirectionalSource. For use with Cloth and SpeedTree
     */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force",
 		meta = (EditCondition = "bEnableWind", Units = "Degrees", ClampMin=0, PinHiddenByDefault))
 	float WindDirectionNoiseAngle = 0.0f;
 
 	// 単純な外力ベクトル
 	// Simple external force vector
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force|External Force",
 		meta = (PinHiddenByDefault))
 	FVector SimpleExternalForce = FVector::ZeroVector;
 
 	// 単純な外力をワールド座標系で扱うかどうかのフラグ
 	// Flag to handle simple external forces in world coordinate system
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force|External Force",
 		meta = (PinHiddenByDefault))
 	bool bUseWorldSpaceSimpleExternalForce = true;
 	
@@ -975,18 +518,17 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* 外力のプリセット。C++で独自のプリセットを追加可能(Instanced Struct)
 	* External force presets. You can add your own presets in C++.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Force|External Force",
 		meta = (BaseStruct = "/Script/KawaiiPhysics.KawaiiPhysics_ExternalForce", ExcludeBaseStruct))
 	TArray<FInstancedStruct> ExternalForces;
 
 	/**
-	* !!! VERY VERY EXPERIMENTAL !!!
-	* 外力のプリセット。BP・C++で独自のプリセットを追加可能(Instanced Property)
+	* EXPERIMENTAL: 外力のプリセット。BP・C++で独自のプリセットを追加可能(Instanced Property)
 	* 注意：AnimNodeをクリック or ABPをコンパイルしないと正常に動作しません
-	* External force presets. You can add your own presets in BP or C++
+	* External force presets (experimental). You can add your own presets in BP or C++.
 	* Note: If you do not click on AnimNode or compile ABP, it will not work properly.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Instanced, Category = "ExternalForce",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Instanced, Category = "Force|External Force",
 		meta=(DisplayName="CustomExternalForces(EXPERIMENTAL)"))
 	TArray<TObjectPtr<UKawaiiPhysics_CustomExternalForce>> CustomExternalForces;
 
@@ -994,18 +536,18 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* レベル上の各コリジョンとの判定を行うフラグ。有効にすると物理処理の負荷が大幅に上がります
 	* Flag for collision detection with each collision on the level. Enabling this will significantly increase the load of physics processing.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Collision", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|World Collision", meta = (PinHiddenByDefault))
 	bool bAllowWorldCollision = false;
 
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Collision",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|World Collision",
 		meta = (PinHiddenByDefault, InlineEditConditionToggle))
 	bool bOverrideCollisionParams = false;
 	/** 
 	* SkeletalMeshComponentが持つコリジョン設定ではなく、独自のコリジョン設定をWorldCollisionで使用する際に設定
 	* Use custom collision settings in WorldCollision instead of the collision settings set in SkeletalMeshComponent.
 	*/
-	UPROPERTY(EditAnywhere, Category = "World Collision",
+	UPROPERTY(EditAnywhere, Category = "Limits|World Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bOverrideCollisionParams", DisplayName=
 			"Override SkelComp Collision Params"))
 	FBodyInstance CollisionChannelSettings;
@@ -1014,7 +556,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* WorldCollisionにて、SkeletalMeshComponentが持つコリジョン(PhysicsAsset)を無視するフラグ
 	* In WorldCollision, Flag to ignore collisions for SkeletalMeshComponent(PhysicsAsset) in WorldCollision
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World Collision",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|World Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bAllowWorldCollision"))
 	bool bIgnoreSelfComponent = true;
 
@@ -1022,30 +564,79 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* WorldCollisionにて、SkeletalMeshComponentが持つコリジョン(PhysicsAsset)を無視する設定（骨）
 	* In WorldCollision, set to ignore collision (PhysicsAsset) of SkeletalMeshComponent using bone
 	*/
-	UPROPERTY(EditAnywhere, Category = "World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
+	UPROPERTY(EditAnywhere, Category = "Limits|World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
 	TArray<FBoneReference> IgnoreBones;
 
 	/** 
 	* WorldCollisionにて、SkeletalMeshComponentが持つコリジョン(PhysicsAsset)を無視する設定（骨名のプリフィックス）
 	* In WorldCollision, set to ignore collision (PhysicsAsset) of SkeletalMeshComponent using bone name prefix
 	*/
-	UPROPERTY(EditAnywhere, Category = "World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
+	UPROPERTY(EditAnywhere, Category = "Limits|World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
 	TArray<FName> IgnoreBoneNamePrefix;
 
-	/** 
+	/**
 	* ExternalForceなどで使用するフィルタリング用タグ
 	* Tag for filtering of ExternalForce etc
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tag")
 	FGameplayTag KawaiiPhysicsTag;
 
-	UPROPERTY(BlueprintReadWrite, Category = "Bones")
+	/**
+	* 物理制御対象ボーンのランタイムキャッシュ。Initialize_AnyThread で毎回再構築されるため非シリアライズ(Transient)。
+	* Runtime cache of bones under physics control. Rebuilt every Initialize_AnyThread, so it is Transient (not serialized).
+	*/
+	UPROPERTY(Transient, BlueprintReadWrite, Category = "Bones")
 	TArray<FKawaiiPhysicsModifyBone> ModifyBones;
 
 	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics")
 	float DeltaTime = 0.0f;
 
 private:
+	/**
+	* コリジョン球がボーン間の隙間を埋めるのに必要なダミーボーン数（半径ベースの被覆数）を計算。
+	* Calculates how many inter-bone dummy bones are needed so collision spheres cover the gap (radius-based coverage count).
+	*/
+	int32 CalcInterBoneDummyCoverageCount(float Distance, float AvgRadius) const;
+
+	/**
+	* Inserts inter-bone dummy bones before recursively adding the real child bone.
+	*/
+	int32 InsertInterBoneDummyBones(TArray<FKawaiiPhysicsModifyBone>& InModifyBones,
+	                               FComponentSpacePoseContext& Output,
+	                               const FBoneContainer& BoneContainer,
+	                               const FReferenceSkeleton& RefSkeleton,
+	                               int32 ParentModifyBoneIndex,
+	                               int32 ChildBoneIndex,
+	                               TArray<int32>& OutInsertedInterBoneDummyIndices) const;
+
+	/**
+	* 親と任意の子位置の間にインターボーンダミーを挿入するコア処理（実子ボーン／末端ダミー共用）
+	* Core routine that inserts inter-bone dummies between a parent and an explicit child transform.
+	* Used both by the real-child path and the terminal tip-dummy path.
+	* @return 最後に挿入したダミーのインデックス（0個なら ParentModifyBoneIndex） / index of the last inserted dummy (or ParentModifyBoneIndex when none)
+	*/
+	int32 InsertInterBoneDummyBonesCore(TArray<FKawaiiPhysicsModifyBone>& InModifyBones,
+	                                    int32 ParentModifyBoneIndex,
+	                                    const FVector& ChildLocation,
+	                                    const FQuat& ChildRotation,
+	                                    const FVector& ChildScale,
+	                                    float Distance,
+	                                    TArray<int32>& OutInsertedInterBoneDummyIndices) const;
+
+	/**
+	* Finalizes inter-bone dummy metadata after the real child bone has been added.
+	*/
+	void FinalizeInterBoneDummyBones(TArray<FKawaiiPhysicsModifyBone>& InModifyBones,
+	                                 const TArray<int32>& InsertedInterBoneDummyIndices,
+	                                 int32 ChildModifyBoneIndex) const;
+
+	/**
+	* Removes inserted inter-bone dummy bones when the real child bone cannot be added.
+	*/
+	void RollbackInterBoneDummyBones(TArray<FKawaiiPhysicsModifyBone>& InModifyBones,
+	                                 int32 ParentModifyBoneIndex,
+	                                 const TArray<int32>& InsertedInterBoneDummyIndices) const;
+
 	/**
 	 * Flag indicating whether the physics settings have been initialized.
 	 */
@@ -1089,9 +680,26 @@ private:
 	 */
 	FTransform PrevBaseBoneSpace2ComponentSpace = FTransform::Identity;
 
+#if !UE_BUILD_SHIPPING
+	// --- 警告ログ用診断 / Diagnostics for warning logs ---
+	// 警告ログのノード特定用にGameThread(OnInitializeAnimInstance)で1回だけ収集する識別名（AnyThreadからのUObjectアクセス回避）
+	// Identifying names collected once on GameThread (OnInitializeAnimInstance) for warning logs (avoids UObject access on AnyThread)
+	FName CachedAnimInstanceClassName;
+	FName CachedComponentName;
+	FName CachedOwnerActorName;
+	// SimulationBaseBone無効警告をノードごと1回だけ出すためのガード / Guard to log the invalid SimulationBaseBone warning once per node
+	bool bSimBaseBoneInvalidWarned = false;
+#endif
+
 	// --- Shared Collision ---
-	// 共有コリジョン用キャッシュ（PreUpdateでGameThread初期化、以降はAnyThreadでロックフリー読み取り）
-	// Cached shared collision pointers (initialized in PreUpdate on GameThread, then read lock-free on AnyThread)
+	// Subsystemとowner ActorはGameThread(OnInitializeAnimInstance)で1回解決してキャッシュする（Evaluate(AnyThread)での
+	// GetWorld/GetSubsystem/GetOwnerナビゲーション回避）。ファミリーrootはアタッチ変更追従のためEvaluate側で都度解決する。
+	// Subsystem/owner cached once on the GameThread; the family root is re-resolved each attempt in Evaluate to follow runtime attachment changes.
+	TWeakObjectPtr<UKawaiiPhysicsSharedCollisionSubsystem> CachedSharedCollisionSubsystem;
+	TWeakObjectPtr<AActor> CachedSharedCollisionOwnerActor;
+
+	// 共有コリジョン用キャッシュ（Evaluate(AnyThread)で初期化・参照。Subsystemはロックでスレッドセーフ）
+	// Cached shared collision pointers (initialized and referenced in Evaluate on AnyThread; the subsystem is lock-protected)
 	TSharedPtr<FKawaiiPhysicsSharedCollisionEntry> CachedSharedCollisionEntry;
 	TSharedPtr<FKawaiiPhysicsSharedCollisionSourceSlot> CachedSourceSlot;
 	bool bSharedCollisionInitialized = false;
@@ -1106,14 +714,59 @@ private:
 	TArray<FBoxLimit> SharedBoxLimits;
 	TArray<FPlanarLimit> SharedPlanarLimits;
 
-	// ReadMerged結果のキャッシュ（メンバ化によりフレーム間でcapacityを再利用）
+	// ReadMergedの結果を受け取るキャッシュ。メンバに持たせてフレーム間で確保済みメモリを使い回す
 	// Cached ReadMerged result (member variable to reuse capacity across frames)
 	FKawaiiPhysicsSharedCollisionData SharedCollisionMergedData;
+
+	// Publish時に使い回す一時バッファ。Slot側のBufferと中身を入れ替える(swap)ことで前フレームに確保したメモリが戻り、毎フレームのメモリ確保を避けられる
+	// Scratch for Publish (swap-based, reuses capacity across frames to avoid per-frame allocation on the source)
+	FKawaiiPhysicsSharedCollisionData SharedCollisionPublishScratch;
+
+	// 風の乱数(gust/cone)をフレーム単位でキャッシュしサブステップ間で同一値を使う（NumStep非依存＝フレームレート非依存）
+	// Cache wind randomness (gust/cone) per frame, shared across substeps (frame-rate independent)
+	mutable uint64 CachedWindNoiseFrame = 0;
+	mutable FQuat CachedWindNoiseRotation = FQuat::Identity;
+	mutable float CachedWindGustFactor = 1.0f;
+
+	// --- World Collision ランタイムキャッシュ / World Collision runtime caches ---
+	// IgnoreBoneNamePrefix のFString版（ホットパスでのFName::ToString回避。AdjustByWorldCollisionで遅延再構築）
+	// FString versions of IgnoreBoneNamePrefix (avoids FName::ToString in the hot path; lazily rebuilt in AdjustByWorldCollision)
+	TArray<FString> IgnoreBoneNamePrefixStrings;
+	TArray<FName> IgnoreBoneNamePrefixCache;
+	// sweep結果を受け取る使い回しバッファ（フレーム間で確保済みメモリを再利用） / Sweep-result scratch (reuses capacity across frames)
+	TArray<FHitResult> WorldCollisionHitsScratch;
+
+	// bridge dummy feedback の集計用使い回しバッファ（端点index→押し出し/重み）。SimulateOnce毎のTMap確保を避け、
+	// フレーム間で確保済みメモリを再利用する。 / Bridge-dummy feedback accumulation scratch (endpoint index -> push/weight);
+	// avoids the per-SimulateOnce TMap allocation and reuses capacity across frames.
+	TArray<FVector> BridgeFeedbackPushScratch;
+	TArray<float> BridgeFeedbackWeightScratch;
 
 	/**
 	* Stores the delta time from the previous frame.
 	*/
 	float DeltaTimeOld = 0.0f;
+
+	// ===== 固定タイムステップ・サブステップ化（UKawaiiPhysicsDeveloperSettings 連動） =====
+	// Fixed-timestep substepping (driven by UKawaiiPhysicsDeveloperSettings)
+	// 未消費の実時間 / Unconsumed real time
+	float SubstepAccumulator = 0.0f;
+	// このフレームの実dt（DeltaTimeとは別に保持） / This frame's real dt (kept separate from DeltaTime)
+	float FrameDeltaTime = 0.0f;
+	// 毎フレーム1回キャッシュする設定 / Settings cached once per frame
+	bool bUseFixedSubsteppingCached = false;
+	int32 MaxSubstepsCached = 4;
+	// サブステップ実行中フラグ＆固定dt（GetStepDeltaTime が参照） / Substep-in-progress flag & fixed dt (read by GetStepDeltaTime)
+	bool bInSubstep = false;
+	float StepDeltaTime = 0.0f;
+	// ポーズ補間用：前フレームのポーズ目標が有効か（初回/リセット後は現在値で初期化）
+	// Pose interpolation: whether the previous-frame pose target is valid (init to current on first frame / after reset)
+	bool bSubstepPoseInitialized = false;
+	// このフレームで消費した実時間割合(0..1)。PreSkelCompTransform をこの割合だけ前進させ、未消費の
+	// component 移動を次にステップが走るフレームへ繰り越す（NumSteps==0 では0で据え置き）。legacy/teleport時は1。
+	// Fraction of elapsed real time consumed this frame (0..1). PreSkelCompTransform advances by this fraction so
+	// unconsumed component movement carries to the next stepping frame (0 holds it when NumSteps==0). 1 for legacy/teleport.
+	float PreSkelCompTransformConsumeFraction = 1.0f;
 
 #if WITH_EDITORONLY_DATA
 	bool bEditing = false;
@@ -1130,14 +783,16 @@ public:
 	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
 	virtual bool NeedsDynamicReset() const override { return true; }
 	virtual void ResetDynamics(ETeleportType InTeleportType) override;
+	// GameThreadで1回だけ呼ばれる初期化。警告ログ用の識別名収集とbEditing判定をここで行う（毎フレームのPreUpdateを避けるため）
+	// Called once on the GameThread. Collects warning-log identifier names and resolves bEditing here (to avoid a per-frame PreUpdate)
+	virtual bool NeedsOnInitializeAnimInstance() const override { return true; }
+	virtual void OnInitializeAnimInstance(const FAnimInstanceProxy* InProxy, const UAnimInstance* InAnimInstance) override;
 	// End of FAnimNode_Base interface
 
 	// FAnimNode_SkeletalControlBase interface
 	virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output,
 	                                               TArray<FBoneTransform>& OutBoneTransforms) override;
 	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
-	virtual bool HasPreUpdate() const override;
-	virtual void PreUpdate(const UAnimInstance* InAnimInstance) override;
 	// End of FAnimNode_SkeletalControlBase interface
 
 #if WITH_EDITORONLY_DATA
@@ -1169,6 +824,22 @@ public:
 	 */
 	float GetDeltaTimeOld() const;
 
+	int32 GetEffectiveTargetFramerate() const
+	{
+		return FMath::Max(1, TargetFramerate);
+	}
+
+	/**
+	 * シミュレーションで使用すべき dt を返す。サブステップ実行中は固定 dt（FixedDt）、
+	 * それ以外は実フレーム dt（DeltaTime）。重力・積分・外力クラスはこれを参照する。
+	 * Returns the dt the simulation should use: the fixed dt while substepping, otherwise the real
+	 * frame dt. Gravity / integration / external-force classes read this instead of DeltaTime.
+	 */
+	float GetStepDeltaTime() const
+	{
+		return bInSubstep ? StepDeltaTime : DeltaTime;
+	}
+
 	/**
 	 * Get Transform from BaseBoneSpace to ComponentSpace.
 	 */
@@ -1185,6 +856,14 @@ public:
 	// Given a bone index, get the transform in the currently selected simulation space
 	FTransform GetBoneTransformInSimSpace(FComponentSpacePoseContext& Output,
 	                                      const FCompactPoseBoneIndex& BoneIndex) const;
+
+	// BoneSpace外力が使うボーンTransformを解決。dummyは実親基準、非dummyでもLODでculledされた実ボーンは
+	// 無効indexになるため、両者ともガードする（無効→Identity、クラッシュ回避）。
+	// Resolve the bone transform used by bone-space external forces. Dummies use their real parent; non-dummy
+	// real bones can also be LOD-culled (invalid compact-pose index), so guard both (invalid -> Identity, no crash).
+	FTransform ResolveExternalForceBoneTransform(FComponentSpacePoseContext& Output,
+	                                             const FKawaiiPhysicsModifyBone& Bone,
+	                                             const FKawaiiPhysicsModifyBone& ParentBone) const;
 
 	// Convert a transform from one simulation space to another (internal cache-aware)
 	FTransform ConvertSimulationSpaceTransform(FComponentSpacePoseContext& Output,
@@ -1247,9 +926,52 @@ protected:
 	                  FKawaiiPhysicsSyncBone& SyncBone);
 
 	/**
+	 * BoneSubdivision由来の内部dummyをSyncBoneの子ターゲット/Previewから除外するか判定する。
+	 * Returns true when an internal BoneSubdivision dummy should stay out of SyncBone child targets/previews.
+	 */
+	bool IsExcludedFromSyncBoneChildTarget(const FKawaiiPhysicsModifyBone& Bone) const;
+
+	/**
+	 * SyncBoneの子ターゲットを収集する。内部dummyは飛ばすが、その子孫探索は継続する。
+	 * Collects SyncBone child targets while skipping internal dummies but still traversing their descendants.
+	 */
+	void CollectSyncBoneChildTargets(FKawaiiPhysicsSyncTargetRoot& TargetRoot);
+
+	/**
+	 * SyncBone適用後にBoneSubdivision由来dummyのPoseを実親/実子から再補間する。
+	 * Rebuilds BoneSubdivision dummy poses from their real endpoints after SyncBone moves target poses.
+	 */
+	void UpdateSubdivisionDummyPoseAfterSyncBones(const FBoneContainer& BoneContainer);
+
+	/**
+	 * 分割末端(tip) dummyのPoseを実親(ancestor)から計算する。UpdateModifyBonesPoseTransformと
+	 * UpdateSubdivisionDummyPoseAfterSyncBonesで共有。
+	 * Computes a subdivided tip-dummy pose from its real ancestor. Shared by UpdateModifyBonesPoseTransform
+	 * and UpdateSubdivisionDummyPoseAfterSyncBones.
+	 */
+	void UpdateTipDummyPose(FKawaiiPhysicsModifyBone& Bone);
+
+	/**
+	 * inter-bone dummyのPoseを実親・実子から補間する（LODで実子が無効な場合は親へフォールバック）。
+	 * 上記2関数で共有し、LODフォールバックの実装漏れを防ぐ。
+	 * Interpolates an inter-bone dummy pose from its real endpoints (falls back to the parent when the real
+	 * child is LOD-culled). Shared by the two functions above to prevent missing the LOD fallback.
+	 */
+	void UpdateInterBoneDummyPose(FKawaiiPhysicsModifyBone& Bone, const FBoneContainer& BoneContainer);
+
+	/**
 	 * Initializes the bone constraints for the physics simulation.
 	 */
 	void InitBoneConstraints();
+
+	/**
+	* 横方向Constraintに沿ってコリジョンセンサーとなるbridge dummyをModifyBonesに追加する（元Constraintは温存）。
+	* 実ボーンへのフィードバックは毎フレームの直接変位転送(SimulateModifyBones)が担う。
+	* Adds bridge collision-SENSOR dummies along horizontal constraints to ModifyBones (original constraints kept intact).
+	* Feedback to the real bones is the per-frame direct displacement transfer in SimulateModifyBones.
+	* InitBoneConstraints末尾から呼ばれる（ModifyBonesとMergedBoneConstraintsが構築済みであること） / Called at the end of InitBoneConstraints (after ModifyBones & MergedBoneConstraints are built).
+	*/
+	void InsertBridgeDummiesForConstraints();
 
 	/**
 	 * Applies the data asset to LimitData.
@@ -1360,23 +1082,29 @@ protected:
 	                        const FBoneContainer& BoneContainer, const FTransform& ComponentTransform) const;
 
 	/**
-	 * 共有コリジョンの初期化（PreUpdate経由でGameThreadから呼ばれる）
-	 * Initialize shared collision entry and source slot.
-	 * Called from PreUpdate() on the GameThread to ensure TMap mutations are thread-safe.
+	 * 共有コリジョンのEntry/Slotを初期化する。Evaluate(Worker)から呼ばれる。
+	 * GameThreadでキャッシュ済みのSubsystem/owner Actorを使い、Registry/SlotはSubsystem内のFRWLockで保護されるためWorkerから安全。
+	 * 制限: TWeakObjectPtr::Get / AActor::GetAttachParentActor を read-only で触るため、並列eval中はアタッチ階層が不変かつ
+	 * GCが走らない前提に依存する（eval中のアタッチ変更や、ウィンドソース/コリジョンの動的増減は非対応）。
+	 * Initialize shared collision entry and source slot, using the GameThread-cached subsystem/owner actor.
+	 * Called from Evaluate on the worker thread; the registry/slot is lock-protected so this is thread-safe.
+	 * Limitation: it reads TWeakObjectPtr::Get / AActor::GetAttachParentActor and assumes the attach hierarchy is
+	 * immutable and GC does not run during parallel eval (re-attaching, or adding/removing wind sources/colliders
+	 * mid-eval, is not supported).
 	 */
-	void InitializeSharedCollision(const UAnimInstance* InAnimInstance);
+	void InitializeSharedCollision();
 
 	/**
-	 * 計算済みコリジョンをSubsystemに公開する（AnyThread、ロックフリー）
-	 * Write computed collision data to the SharedCollisionSubsystem as source (any thread, lock-free)
+	 * 計算済みコリジョンをSubsystemに公開する（AnyThread）
+	 * Write computed collision data to the SharedCollisionSubsystem as source (any thread)
 	 */
 	void WriteSharedCollisionToSubsystem(FComponentSpacePoseContext& Output, const FTransform& ComponentTransform);
 
 	/**
-	 * 共有コリジョンを読み取り、シミュレーション空間に変換する（AnyThread、ロックフリー）
-	 * Read shared collision and convert to simulation space (any thread, lock-free)
+	 * 共有コリジョンを読み取り、シミュレーション空間に変換する（AnyThread）
+	 * Read shared collision and convert to simulation space (any thread)
 	 */
-	void UpdateSharedCollisionLimits(FComponentSpacePoseContext& Output, const FTransform& ComponentTransform);
+	void UpdateSharedCollisionLimits(FComponentSpacePoseContext& Output);
 
 	/**
 	 * Updates the pose transform for all modified bones.
@@ -1411,6 +1139,16 @@ protected:
 	                         const FTransform& ComponentTransform);
 
 	/**
+	 * シミュレーションの1ステップ分（Simulate ループ＋ダミー配置＋コリジョン＋拘束＋長さ復元）を
+	 * 現在の GetStepDeltaTime() で1回実行する。SimulateModifyBones から legacy で1回、
+	 * サブステップ時は固定 dt で複数回呼ばれる。
+	 * Runs ONE simulation step (Simulate loop + dummy placement + collision + constraints + length restore)
+	 * at the current GetStepDeltaTime(). Called once (legacy) or N times (fixed substepping) from SimulateModifyBones.
+	 */
+	void SimulateOnce(FComponentSpacePoseContext& Output, const FTransform& ComponentTransform,
+	                  const FSceneInterface* Scene, const USkeletalMeshComponent* SkelComp);
+
+	/**
 	 * Simulates the physics for a single bone.
 	 *
 	 * @param Bone The bone to simulate.
@@ -1424,8 +1162,41 @@ protected:
 	              const float& Exponent, const USkeletalMeshComponent* SkelComp,
 	              FComponentSpacePoseContext& Output);
 
+	// ===== 物理計算の各ステップ（引数に FComponentSpacePoseContext を取らない。Simulate() から呼ばれる）=====
+	// Each physics step; takes no FComponentSpacePoseContext. Called from Simulate().
+
+	/** このステップの速度を作る（速度の再構成→減衰→+wind→重力）。ユーザー外力(ApplyToVelocity)の前に呼ぶ。 */
+	FVector ComputeVerletStepVelocity(FKawaiiPhysicsModifyBone& Bone, const FVector& WindVelocity);
+
+	/** Verlet ステップ後半。ComputeVerletStepVelocity が作り、外力フック(ApplyToVelocity)で調整された後の
+	 *  速度から位置を更新する（Location += Velocity * GetStepDeltaTime()）。 */
+	void IntegrateVerletStepPosition(FKawaiiPhysicsModifyBone& Bone, const FVector& Velocity);
+
+	/** simple external force（速度を経由しない位置オフセット。位置空間の後処理）。 */
+	void ApplySimpleExternalForce(FKawaiiPhysicsModifyBone& Bone);
+
+	/** ComponentSpace/WorldSpace の world 移動追従（BaseBoneSpace は Simulate() 側で別処理、Output依存）。 */
+	void ApplyWorldMoveFollowNonBaseBone(FKawaiiPhysicsModifyBone& Bone);
+
+	/** Pull to Pose Location（剛性）。 */
+	void ApplyStiffnessPull(FKawaiiPhysicsModifyBone& Bone, const FKawaiiPhysicsModifyBone& ParentBone, float Exponent);
+
+	// 自動テスト用アクセサ。private/protected の sim 状態・物理計算・コリジョン関数へアクセスする。
+	// Shipping/Test（WITH_DEV_AUTOMATION_TESTS==0）では宣言ごと除外し、出荷ビルドにテスト表面を残さない。
+	// Test-only accessor for private/protected sim state, core functions, and collision functions.
+	// Stripped in Shipping/Test (WITH_DEV_AUTOMATION_TESTS==0); leaves no test surface in shipping builds.
+#if WITH_DEV_AUTOMATION_TESTS
+	friend struct FKawaiiPhysicsTestAccessor;
+#endif
+
 	/**
 	 * Adjusts the bone position based on world collision.
+	 *
+	 * スレッド安全性・制限: Worker(Evaluate)スレッドから同期sweep(SweepSingle/MultiByChannel)を呼ぶ。
+	 * 並列eval中はphysics sceneがread-safeである前提に依存し、コリジョン構成の動的変更中は非対応。
+	 * Thread-safety / limitation: called from the worker (Evaluate) thread and issues synchronous sweeps
+	 * (SweepSingle/MultiByChannel). It assumes the physics scene is read-safe during parallel eval, and
+	 * does not support the collision setup being changed dynamically mid-eval.
 	 *
 	 * @param Bone The bone to adjust.
 	 * @param OwningComp The owning skeletal mesh component.
@@ -1529,6 +1300,25 @@ protected:
 
 
 private:
+	bool bModifyBonesNeedsReinit = false;
+	int32 LastInitializedBoneSubdivisionCount = 0;
+	int32 LastInitializedBoneConstraintSubdivisionCount = 0;
+	// DensifyByRadiusは配置数（生成トポロジ）を左右するため再構築判定に含める。既定値はプロパティのデフォルトに合わせる
+	// DensifyByRadius affects the placed dummy count (generation topology), so it's part of the reinit check. Default matches the property.
+	bool LastInitializedBoneSubdivisionDensifyByRadius = false;
+	// Densify=true 時のみ、node Radius 変更でダミー数を再構築するため追跡（RadiusCurveの変更は別途再init要）
+	// Tracked to rebuild the dummy count when the node Radius changes while Densify is on (RadiusCurve edits still need a separate re-init).
+	float LastInitializedRadius = 0.0f;
+	float LastInitializedDummyBoneLength = 0.0f;
+
+	/**
+	 * 明示的なreinit要求、または前回init以降の設定変更（subdivision数/DensifyByRadius/Radius/DummyBoneLength）で
+	 * ModifyBonesの再構築が必要かを判定する。EvaluateSkeletalControl_AnyThreadの長い条件式を関数化したもの。
+	 * Returns true when ModifyBones must be rebuilt due to an explicit reinit request or tracked setting changes
+	 * (subdivision counts / DensifyByRadius / Radius / DummyBoneLength) since the last init.
+	 */
+	bool ShouldReinitModifyBones() const;
+
 	// SimulationSpace conversion cache (per-evaluation)
 	struct FSimulationSpaceCache
 	{
@@ -1571,18 +1361,12 @@ private:
 private:
 	// Evaluate中のみ有効なキャッシュ（SimulationSpace<->Component）
 	// AnyThread評価なので「フレーム跨ぎで使い回さない」こと
-	mutable FSimulationSpaceCache CurrentEvalSimSpaceCache;
-	mutable bool bHasCurrentEvalSimSpaceCache = false;
+	FSimulationSpaceCache CurrentEvalSimSpaceCache;
+	bool bHasCurrentEvalSimSpaceCache = false;
 
 	// Evaluate中のみ有効なWorldSpaceキャッシュ（World<->Component）
-	mutable FSimulationSpaceCache CurrentEvalWorldSpaceCache;
-	mutable bool bHasCurrentEvalWorldSpaceCache = false;
+	FSimulationSpaceCache CurrentEvalWorldSpaceCache;
+	bool bHasCurrentEvalWorldSpaceCache = false;
 };
-
-
-
-
-
-
 
 

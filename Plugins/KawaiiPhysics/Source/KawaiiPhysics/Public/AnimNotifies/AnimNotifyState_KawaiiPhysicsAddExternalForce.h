@@ -1,4 +1,4 @@
-﻿// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
+// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include "GameplayTagContainer.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 5
+#if !UE_VERSION_OLDER_THAN(5, 5, 0)
 #include "StructUtils/InstancedStruct.h"
 #else
 #include "InstancedStruct.h"
@@ -15,50 +15,24 @@
 #include "AnimNotifyState_KawaiiPhysicsAddExternalForce.generated.h"
 
 /**
- * UAnimNotifyState_KawaiiPhysicsAddExternalForce
- * 
- * This class represents an animation notify state that adds external forces to a skeletal mesh component
- * during an animation sequence. It inherits from UAnimNotifyState and provides functionality to add and remove
- * external forces at the beginning and end of the animation notify state.
+ * AnimNotifyState の区間中、KawaiiPhysics に外力を追加する（開始で追加・終了で除去、タグでフィルタ可能）。
+ * AnimNotifyState that adds external forces to KawaiiPhysics nodes for its duration (added on begin, removed on end; filterable by tag).
  */
-UCLASS(Blueprintable, meta = (DisplayName = "KawaiiPhyiscs: Add ExternalForce"))
+UCLASS(Blueprintable, meta = (DisplayName = "KawaiiPhysics: Add ExternalForce"))
 class KAWAIIPHYSICS_API UAnimNotifyState_KawaiiPhysicsAddExternalForce : public UAnimNotifyState
 {
 	GENERATED_BODY()
 
 public:
-	/**
-	 * Constructor for UAnimNotifyState_KawaiiPhysicsAddExternalForce.
-	 * 
-	 * @param ObjectInitializer - The object initializer for this class.
-	 */
 	UAnimNotifyState_KawaiiPhysicsAddExternalForce(const FObjectInitializer& ObjectInitializer);
 
-	/**
-	 * Gets the name of the notify state.
-	 * 
-	 * @return The name of the notify state as a string.
-	 */
 	virtual FString GetNotifyName_Implementation() const override;
 
-	/**
-	 * Called when the animation notify state begins.
-	 * 
-	 * @param MeshComp - The skeletal mesh component.
-	 * @param Animation - The animation sequence.
-	 * @param TotalDuration - The total duration of the notify state.
-	 * @param EventReference - The event reference.
-	 */
+	/** 区間開始時に外力を追加 / Adds the external forces when the state begins. */
 	virtual void NotifyBegin(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation, float TotalDuration,
 	                         const FAnimNotifyEventReference& EventReference) override;
 
-	/**
-	 * Called when the animation notify state ends.
-	 * 
-	 * @param MeshComp - The skeletal mesh component.
-	 * @param Animation - The animation sequence.
-	 * @param EventReference - The event reference.
-	 */
+	/** 区間終了時に外力を除去 / Removes the external forces when the state ends. */
 	virtual void NotifyEnd(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
 	                       const FAnimNotifyEventReference& EventReference) override;
 
@@ -76,7 +50,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ExternalForce")
 	FGameplayTagContainer FilterTags;
 
-	/** 
+	/**
 	 * Whether to filter tags to exact matches (if False, parent tags will also be included).
 	 * Tagのフィルタリングにて完全一致にするか否か（Falseの場合は親Tagも含めます）
 	 */

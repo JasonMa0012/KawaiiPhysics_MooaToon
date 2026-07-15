@@ -28,6 +28,11 @@ void UAnimNotifyState_KawaiiPhysicsAddExternalForce::NotifyBegin(USkeletalMeshCo
                                                                  float TotalDuration,
                                                                  const FAnimNotifyEventReference& EventReference)
 {
+	if (!MeshComp)
+	{
+		return;
+	}
+
 	UKawaiiPhysicsLibrary::AddExternalForcesToComponent(MeshComp, AdditionalExternalForces, this,
 	                                                    FilterTags, bFilterExactMatch);
 	Super::NotifyBegin(MeshComp, Animation, TotalDuration, EventReference);
@@ -37,6 +42,11 @@ void UAnimNotifyState_KawaiiPhysicsAddExternalForce::NotifyEnd(USkeletalMeshComp
                                                                UAnimSequenceBase* Animation,
                                                                const FAnimNotifyEventReference& EventReference)
 {
+	if (!MeshComp)
+	{
+		return;
+	}
+
 	UKawaiiPhysicsLibrary::RemoveExternalForcesFromComponent(MeshComp, this, FilterTags, bFilterExactMatch);
 
 	Super::NotifyEnd(MeshComp, Animation, EventReference);

@@ -4,9 +4,10 @@
 #include "AnimNode_KawaiiPhysics.h"
 
 #if WITH_EDITOR
+#include "Engine/Engine.h" 
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "SceneManagement.h" // DrawDirectionalArrow, DrawSphere
+#include "SceneManagement.h"
 #endif
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(KawaiiPhysicsSyncBone)
@@ -25,29 +26,65 @@ void FKawaiiPhysicsSyncTarget::Apply(TArray<FKawaiiPhysicsModifyBone>& ModifyBon
 {
 	if (ModifyBoneIndex < 0 || !ModifyBones.IsValidIndex(ModifyBoneIndex))
 	{
-		return;;
+		return;
 	}
 
 	FKawaiiPhysicsModifyBone& Bone = ModifyBones[ModifyBoneIndex];
 	if (Bone.bSkipSimulate)
 	{
-		return;;
+		return;
 	}
 
-	// // Apply Alpha per target
+	// length rate 由来のスケールを並進に適用
 	const FVector ScaledTranslation = Translation * ScaleByLengthRateCurve;
 
 #if WITH_EDITORONLY_DATA
 	TranslationBySyncBone = ScaledTranslation;
 #endif
 
-	if (Bone.ParentIndex >= 0)
+	if (Bone.ParentIndex >= 0 && ModifyBones.IsValidIndex(Bone.ParentIndex))
 	{
-		// Maintain bone length relative to parent
-		const auto& ParentBone = ModifyBones[Bone.ParentIndex];
+		const FKawaiiPhysicsModifyBone& ParentBone = ModifyBones[Bone.ParentIndex];
 		const FVector NewPoseLocation = Bone.PoseLocation + ScaledTranslation;
-		Bone.PoseLocation = (NewPoseLocation - ParentBone.PoseLocation).GetSafeNormal() * Bone.BoneLength +
-			ParentBone.PoseLocation;
+		if (ParentBone.bInterBoneDummy)
+		{
+			// 親が分割 dummy だと位置が古く（後段で再計算）、それ基準で長さ拘束すると伸縮バグが出る。
+			// 対策: dummy を飛ばし祖父基準で拘束する。dummy は祖父..child を InterBoneAlpha で内分するので距離 BoneLength/(1-alpha) を使う。
+			const float OneMinusAlpha = 1.0f - ParentBone.InterBoneAlpha;
+			const int32 GrandParentIndex = ParentBone.InterBoneRealParentIndex;
+			if (OneMinusAlpha > KINDA_SMALL_NUMBER && ModifyBones.IsValidIndex(GrandParentIndex))
+			{
+				const FKawaiiPhysicsModifyBone& GrandParent = ModifyBones[GrandParentIndex];
+				const float TargetLength = Bone.BoneLength / OneMinusAlpha;
+				FVector Dir = (NewPoseLocation - GrandParent.PoseLocation).GetSafeNormal();
+				if (Dir.IsNearlyZero())
+				{
+					// 新位置が祖父と一致して方向が消えた場合は既存方向にフォールバック（それも退化なら長さ拘束をスキップ）
+					Dir = (Bone.PoseLocation - GrandParent.PoseLocation).GetSafeNormal();
+				}
+				Bone.PoseLocation = Dir.IsNearlyZero()
+					                    ? NewPoseLocation
+					                    : Dir * TargetLength + GrandParent.PoseLocation;
+			}
+			else
+			{
+				// 退化(alpha≈1)・祖父無効時は並進のみ（長さは後段の再補間に委ねる）
+				Bone.PoseLocation = NewPoseLocation;
+			}
+		}
+		else
+		{
+			// 親に対するボーン長を維持する
+			FVector Dir = (NewPoseLocation - ParentBone.PoseLocation).GetSafeNormal();
+			if (Dir.IsNearlyZero())
+			{
+				// 新位置が親と一致して方向が消えた場合は既存方向にフォールバック（それも退化なら長さ拘束をスキップ）
+				Dir = (Bone.PoseLocation - ParentBone.PoseLocation).GetSafeNormal();
+			}
+			Bone.PoseLocation = Dir.IsNearlyZero()
+				                    ? NewPoseLocation
+				                    : Dir * Bone.BoneLength + ParentBone.PoseLocation;
+		}
 	}
 	else
 	{
@@ -67,7 +104,7 @@ void FKawaiiPhysicsSyncTarget::DebugDraw(FPrimitiveDrawInterface* PDI, const FAn
 
 	if (ModifyBoneIndex >= 0 && Node->ModifyBones.IsValidIndex(ModifyBoneIndex))
 	{
-		// Target Bone Location
+		// ターゲットボーンの位置
 		FVector TargetBoneLocation = Node->ModifyBones[ModifyBoneIndex].Location;
 		if (Node->SimulationSpace == EKawaiiPhysicsSimulationSpace::BaseBoneSpace)
 		{
@@ -78,7 +115,7 @@ void FKawaiiPhysicsSyncTarget::DebugDraw(FPrimitiveDrawInterface* PDI, const FAn
 		           FVector(1.0f), 12, 6,
 		           GEngine->ConstraintLimitMaterialY->GetRenderProxy(), SDPG_World);
 
-		// Force by SyncBone
+		// SyncBone による力
 		DrawForceArrow(TranslationBySyncBone, TargetBoneLocation);
 	}
 }

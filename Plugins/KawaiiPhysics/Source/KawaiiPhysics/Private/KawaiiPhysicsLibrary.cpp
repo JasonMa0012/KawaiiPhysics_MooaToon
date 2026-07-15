@@ -2,7 +2,7 @@
 
 #include "KawaiiPhysicsLibrary.h"
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 6
+#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 #include "Animation/AnimInstance.h"
 #endif
 
@@ -81,8 +81,11 @@ bool UKawaiiPhysicsLibrary::CollectKawaiiPhysicsNodes(TArray<FKawaiiPhysicsRefer
 		const_cast<const USkeletalMeshComponent*>(MeshComp)->GetLinkedAnimInstances();
 	for (UAnimInstance* LinkedInstance : LinkedInstances)
 	{
-		CollectKawaiiPhysicsNodes(Nodes, LinkedInstance, FilterTags,
-		                          bFilterExactMatch);
+		if (LinkedInstance)
+		{
+			CollectKawaiiPhysicsNodes(Nodes, LinkedInstance, FilterTags,
+			                          bFilterExactMatch);
+		}
 	}
 
 	if (UAnimInstance* PostProcessAnimInstance = MeshComp->GetPostProcessInstance())
@@ -321,7 +324,7 @@ DEFINE_FUNCTION(UKawaiiPhysicsLibrary::execSetExternalForceWildcardProperty)
 
 	ExecResult = EKawaiiPhysicsAccessExternalForceResult::NotValid;
 
-	// Read wildcard Value input.
+	// ワイルドカードの Value 入力を読み取る
 	Stack.MostRecentPropertyAddress = nullptr;
 	Stack.MostRecentPropertyContainer = nullptr;
 	Stack.StepCompiledIn<FStructProperty>(nullptr);
@@ -330,20 +333,29 @@ DEFINE_FUNCTION(UKawaiiPhysicsLibrary::execSetExternalForceWildcardProperty)
 	void* ValuePtr = Stack.MostRecentPropertyAddress;
 
 	KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(
-		TEXT("GetExternalForceWildcardProperty"),
-		[&ExecResult, &ExternalForceIndex, &PropertyName, &ValuePtr](FAnimNode_KawaiiPhysics& InKawaiiPhysics)
+		TEXT("SetExternalForceWildcardProperty"),
+		[&ExecResult, &ExternalForceIndex, &PropertyName, &ValuePtr, &ValueProp](FAnimNode_KawaiiPhysics& InKawaiiPhysics)
 		{
 			if (InKawaiiPhysics.ExternalForces.IsValidIndex(ExternalForceIndex) &&
 				InKawaiiPhysics.ExternalForces[ExternalForceIndex].IsValid())
 			{
 				const auto* ScriptStruct = InKawaiiPhysics.ExternalForces[ExternalForceIndex].GetScriptStruct();
-				auto& Force = InKawaiiPhysics.ExternalForces[ExternalForceIndex].GetMutable<
-					FKawaiiPhysics_ExternalForce>();
-
-				if (const FProperty* Property = FindFProperty<FProperty>(ScriptStruct, PropertyName))
+				// ExternalForcesは型なしTArray<FInstancedStruct>のため、check版GetMutable<>ではなくnull返しのGetMutablePtr<>で型ガードする
+				if (FKawaiiPhysics_ExternalForce* Force =
+					InKawaiiPhysics.ExternalForces[ExternalForceIndex].GetMutablePtr<FKawaiiPhysics_ExternalForce>())
 				{
-					Property->CopyCompleteValue(Property->ContainerPtrToValuePtr<uint8>(&Force), ValuePtr);
-					ExecResult = EKawaiiPhysicsAccessExternalForceResult::Valid;
+					if (const FProperty* Property = FindFProperty<FProperty>(ScriptStruct, PropertyName))
+					{
+						// BPワイルドカード入力ピン型と外力側プロパティ型が一致する時のみコピー（型不一致のメモリ破壊を防ぐ）
+						if (ValuePtr && ValueProp && ValueProp->SameType(Property))
+						{
+							if (void* ForceValuePtr = Property->ContainerPtrToValuePtr<uint8>(Force))
+							{
+								Property->CopyCompleteValue(ForceValuePtr, ValuePtr);
+								ExecResult = EKawaiiPhysicsAccessExternalForceResult::Valid;
+							}
+						}
+					}
 				}
 			}
 		});
@@ -360,7 +372,7 @@ DEFINE_FUNCTION(UKawaiiPhysicsLibrary::execGetExternalForceWildcardProperty)
 
 	ExecResult = EKawaiiPhysicsAccessExternalForceResult::NotValid;
 
-	// Read wildcard Value input.
+	// ワイルドカードの Value 入力を読み取る
 	Stack.MostRecentPropertyAddress = nullptr;
 	Stack.MostRecentPropertyContainer = nullptr;
 	Stack.StepCompiledIn<FStructProperty>(nullptr);
@@ -369,31 +381,37 @@ DEFINE_FUNCTION(UKawaiiPhysicsLibrary::execGetExternalForceWildcardProperty)
 	void* ValuePtr = Stack.MostRecentPropertyAddress;
 
 	void* Result = nullptr;
+	const FProperty* ResultProperty = nullptr;
 	KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(
 		TEXT("GetExternalForceWildcardProperty"),
-		[&Result, &ExecResult, &ExternalForceIndex, &PropertyName](FAnimNode_KawaiiPhysics& InKawaiiPhysics)
+		[&Result, &ResultProperty, &ExternalForceIndex, &PropertyName](FAnimNode_KawaiiPhysics& InKawaiiPhysics)
 		{
 			if (InKawaiiPhysics.ExternalForces.IsValidIndex(ExternalForceIndex) &&
 				InKawaiiPhysics.ExternalForces[ExternalForceIndex].IsValid())
 			{
 				const auto* ScriptStruct = InKawaiiPhysics.ExternalForces[ExternalForceIndex].GetScriptStruct();
-				auto& Force = InKawaiiPhysics.ExternalForces[ExternalForceIndex].GetMutable<
-					FKawaiiPhysics_ExternalForce>();
-
-				if (const FProperty* Property = FindFProperty<FProperty>(ScriptStruct, PropertyName))
+				// 型なしFInstancedStructのためGetMutablePtr<>で型ガード
+				if (FKawaiiPhysics_ExternalForce* Force =
+					InKawaiiPhysics.ExternalForces[ExternalForceIndex].GetMutablePtr<FKawaiiPhysics_ExternalForce>())
 				{
-					Result = Property->ContainerPtrToValuePtr<void>(&Force);
-					ExecResult = EKawaiiPhysicsAccessExternalForceResult::Valid;
+					if (const FProperty* Property = FindFProperty<FProperty>(ScriptStruct, PropertyName))
+					{
+						Result = Property->ContainerPtrToValuePtr<void>(Force);
+						ResultProperty = Property;
+					}
 				}
 			}
 		});
 
 	P_FINISH;
 
-	if (ValuePtr && Result)
+	// 出力ピン型と外力側プロパティ型が一致する時のみコピーし、成功扱いにする
+	// （型不一致のメモリ破壊を防ぎ、かつ未コピーのまま成功報告しないようsetterと挙動を揃える）
+	if (ValueProp && ValuePtr && Result && ResultProperty && ValueProp->SameType(ResultProperty))
 	{
 		P_NATIVE_BEGIN;
 			ValueProp->CopyCompleteValue(ValuePtr, Result);
 		P_NATIVE_END;
+		ExecResult = EKawaiiPhysicsAccessExternalForceResult::Valid;
 	}
 }

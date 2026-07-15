@@ -90,7 +90,7 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "SyncTarget")
 	float LengthRateFromSyncTargetRoot = 0.0f;
 
-	// 適応対象のボーンのModifyBoneにおけるIndex
+	// 適用対象のボーンのModifyBoneにおけるIndex
 	// Index in ModifyBone for the target bone
 	UPROPERTY()
 	int32 ModifyBoneIndex = -1;
@@ -124,7 +124,7 @@ struct KAWAIIPHYSICS_API FKawaiiPhysicsSyncTargetRoot : public FKawaiiPhysicsSyn
 	UPROPERTY(EditAnywhere, Category = "SyncTarget")
 	bool bIncludeChildBones = true;
 
-	// TargetRootからの長さ割合に応じてSyncBoneの影響度にスケールを適応（X: LengthRate、Y: Scale）
+	// TargetRootからの長さ割合に応じてSyncBoneの影響度にスケールを適用（X: LengthRate、Y: Scale）
 	// Curve that scales SyncBone's influence based on length rate from TargetRoot (X: Length, Y: Scale)
 	UPROPERTY(EditAnywhere, Category = "SyncBone", meta=(XAxisName="LengthRate", YAxisName="Scale"))
 	FRuntimeFloatCurve ScaleCurveByBoneLengthRate;

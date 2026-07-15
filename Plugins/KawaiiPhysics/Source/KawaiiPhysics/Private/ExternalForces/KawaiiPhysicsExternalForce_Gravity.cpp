@@ -14,7 +14,9 @@ void FKawaiiPhysics_ExternalForce_Gravity::Initialize(const FAnimationInitialize
 {
 	Super::Initialize(Context);
 
-	OwnerCharacter = Cast<ACharacter>(Context.AnimInstanceProxy->GetSkelMeshComponent()->GetOwner());
+	// SkeletalMeshComponentがnullの場合のクラッシュを回避
+	const USkeletalMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
+	OwnerCharacter = SkelComp ? Cast<ACharacter>(SkelComp->GetOwner()) : nullptr;
 }
 
 void FKawaiiPhysics_ExternalForce_Gravity::PreApply(FAnimNode_KawaiiPhysics& Node,
@@ -24,10 +26,10 @@ void FKawaiiPhysics_ExternalForce_Gravity::PreApply(FAnimNode_KawaiiPhysics& Nod
 
 	Force = bUseOverrideGravityDirection ? OverrideGravityDirection.GetSafeNormal() : FVector(0, 0, -1.0f);
 
-	// For Character's Custom Gravity Direction
+	// Characterのカスタム重力方向に対応
 	if (OwnerCharacter)
 	{
-#if	ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+#if !UE_VERSION_OLDER_THAN(5, 3, 0)
 		if (bUseCharacterGravityDirection)
 		{
 			Force = OwnerCharacter->GetGravityDirection();
@@ -66,7 +68,7 @@ void FKawaiiPhysics_ExternalForce_Gravity::ApplyToVelocity(FKawaiiPhysicsModifyB
 		ForceRate = Curve->Eval(Bone.LengthRateFromRoot, 1.0f);
 	}
 
-	InOutVelocity += Force * ForceRate * Node.DeltaTime;
+	InOutVelocity += Force * ForceRate * Node.GetStepDeltaTime();
 
 #if ENABLE_ANIM_DEBUG
 	BoneForceMap.Add(Bone.BoneRef.BoneName, Force * ForceRate);

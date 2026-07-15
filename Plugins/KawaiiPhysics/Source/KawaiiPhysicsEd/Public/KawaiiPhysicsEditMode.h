@@ -11,6 +11,7 @@
 class FEditorViewportClient;
 class FPrimitiveDrawInterface;
 class USkeletalMeshComponent;
+class UKawaiiPhysicsLimitsDataAsset;
 struct FViewportClick;
 
 class FKawaiiPhysicsEditMode : public FAnimNodeEditMode
@@ -46,13 +47,15 @@ protected:
 	void OnLimitDataAssetPropertyChange(FPropertyChangedEvent& InPropertyEvent);
 	bool IsSelectAnimNodeCollision() const;
 	FDelegateHandle LimitsDataAssetPropertyDelegateHandle;
+	/** OnLimitsChangedをbind中のDataAsset（差し替え時に旧アセットからRemoveするため保持） */
+	TWeakObjectPtr<UKawaiiPhysicsLimitsDataAsset> BoundLimitsDataAsset;
 
 private:
 	void RenderModifyBones(FPrimitiveDrawInterface* PDI) const;
 	void RenderLimitAngle(FPrimitiveDrawInterface* PDI) const;
 	void RenderSyncBone(FPrimitiveDrawInterface* PDI) const;
 
-	/** Render each collisions */
+	/** Render each collision limit */
 	void RenderSphericalLimits(FPrimitiveDrawInterface* PDI) const;
 	void RenderCapsuleLimit(FPrimitiveDrawInterface* PDI) const;
 	void RenderBoxLimit(FPrimitiveDrawInterface* PDI) const;
@@ -64,13 +67,13 @@ private:
 	/** Helper function for GetWidgetLocation() and joint rendering */
 	FVector GetWidgetLocation(ECollisionLimitType CollisionType, int32 Index) const;
 
-	// methods to find a valid widget mode for gizmo because doesn't need to show gizmo when the mode is "Ignore"
+	// methods to find a valid widget mode for the gizmo, because we don't need to show the gizmo when the mode is "Ignore"
 	UE_WIDGET::EWidgetMode FindValidWidgetMode(UE_WIDGET::EWidgetMode InWidgetMode) const;
 
 	/** Checking if a collision is selected and the collision is valid */
 	bool IsValidSelectCollision() const;
 
-	// Get Select Colliison Info
+	// Get selected collision info
 	FCollisionLimitBase* GetSelectCollisionLimitRuntime() const;
 	FCollisionLimitBase* GetSelectCollisionLimitGraph() const;
 
@@ -87,6 +90,8 @@ private:
 	ECollisionLimitType SelectCollisionType = ECollisionLimitType::None;
 	int32 SelectCollisionIndex = -1;
 	ECollisionSourceType SelectCollisionSourceType = ECollisionSourceType::AnimNode;
+	/** 選択確定時のコリジョンの安定識別子。削除はindexでなくこのGuidで対象を引き、stale indexによる誤削除を防ぐ */
+	FGuid SelectedCollisionGuid;
 
 	// storing current widget mode 
 	mutable UE_WIDGET::EWidgetMode CurWidgetMode;

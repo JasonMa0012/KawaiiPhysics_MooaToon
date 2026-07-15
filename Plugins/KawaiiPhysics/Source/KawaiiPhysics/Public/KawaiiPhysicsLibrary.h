@@ -46,7 +46,8 @@ struct FKawaiiPhysicsReference : public FAnimNodeReference
 };
 
 /**
- * Exposes operations to be performed on a blend space anim node.
+ * KawaiiPhysics アニメーションノードに対する Blueprint 操作を公開する関数ライブラリ。
+ * Blueprint function library exposing operations on a KawaiiPhysics anim node.
  */
 UCLASS()
 class KAWAIIPHYSICS_API UKawaiiPhysicsLibrary : public UBlueprintFunctionLibrary
@@ -120,13 +121,87 @@ public:
 	static FKawaiiPhysicsReference SetDummyBoneLength(const FKawaiiPhysicsReference& KawaiiPhysics,
 	                                                  float DummyBoneLength)
 	{
-		KAWAIIPHYSICS_VALUE_SETTER(float, DummyBoneLength);
+		KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(
+			TEXT("SetDummyBoneLength"),
+			[DummyBoneLength](FAnimNode_KawaiiPhysics& InKawaiiPhysics) {
+				InKawaiiPhysics.DummyBoneLength = FMath::Max(DummyBoneLength, 0.0f);
+				InKawaiiPhysics.RequestModifyBonesReinit();
+			});
+		return KawaiiPhysics;
 	}
 
 	UFUNCTION(BlueprintPure, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
 	static float GetDummyBoneLength(const FKawaiiPhysicsReference& KawaiiPhysics)
 	{
 		KAWAIIPHYSICS_VALUE_GETTER(float, DummyBoneLength);
+	}
+
+	// BoneSubdivisionCount
+	UFUNCTION(BlueprintCallable, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static FKawaiiPhysicsReference SetBoneSubdivisionCount(const FKawaiiPhysicsReference& KawaiiPhysics,
+	                                                       int32 BoneSubdivisionCount)
+	{
+		KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(
+			TEXT("SetBoneSubdivisionCount"),
+			[BoneSubdivisionCount](FAnimNode_KawaiiPhysics& InKawaiiPhysics) {
+				InKawaiiPhysics.BoneSubdivisionCount = FMath::Clamp(BoneSubdivisionCount, 0, 10);
+				InKawaiiPhysics.RequestModifyBonesReinit();
+			});
+		return KawaiiPhysics;
+	}
+
+	UFUNCTION(BlueprintPure, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static int32 GetBoneSubdivisionCount(const FKawaiiPhysicsReference& KawaiiPhysics)
+	{
+		KAWAIIPHYSICS_VALUE_GETTER(int32, BoneSubdivisionCount);
+	}
+
+	// BoneSubdivisionCollisionOnly
+	UFUNCTION(BlueprintCallable, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static FKawaiiPhysicsReference SetBoneSubdivisionCollisionOnly(const FKawaiiPhysicsReference& KawaiiPhysics,
+	                                                               bool bBoneSubdivisionCollisionOnly)
+	{
+		KAWAIIPHYSICS_VALUE_SETTER(bool, bBoneSubdivisionCollisionOnly);
+	}
+
+	UFUNCTION(BlueprintPure, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static bool GetBoneSubdivisionCollisionOnly(const FKawaiiPhysicsReference& KawaiiPhysics)
+	{
+		KAWAIIPHYSICS_VALUE_GETTER(bool, bBoneSubdivisionCollisionOnly);
+	}
+
+	// BoneConstraintSubdivisionCount
+	UFUNCTION(BlueprintCallable, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static FKawaiiPhysicsReference SetBoneConstraintSubdivisionCount(const FKawaiiPhysicsReference& KawaiiPhysics,
+	                                                                 int32 BoneConstraintSubdivisionCount)
+	{
+		KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(
+			TEXT("SetBoneConstraintSubdivisionCount"),
+			[BoneConstraintSubdivisionCount](FAnimNode_KawaiiPhysics& InKawaiiPhysics) {
+				InKawaiiPhysics.BoneConstraintSubdivisionCount = FMath::Clamp(BoneConstraintSubdivisionCount, 0, 10);
+				InKawaiiPhysics.RequestModifyBonesReinit();
+			});
+		return KawaiiPhysics;
+	}
+
+	UFUNCTION(BlueprintPure, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static int32 GetBoneConstraintSubdivisionCount(const FKawaiiPhysicsReference& KawaiiPhysics)
+	{
+		KAWAIIPHYSICS_VALUE_GETTER(int32, BoneConstraintSubdivisionCount);
+	}
+
+	// BoneConstraintSubdivisionFeedbackScale（ランタイムスカラー: トポロジ不変のためreinit不要 / runtime scalar, no reinit）
+	UFUNCTION(BlueprintCallable, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static FKawaiiPhysicsReference SetBoneConstraintSubdivisionFeedbackScale(const FKawaiiPhysicsReference& KawaiiPhysics,
+	                                                                         float BoneConstraintSubdivisionFeedbackScale)
+	{
+		KAWAIIPHYSICS_VALUE_SETTER(float, BoneConstraintSubdivisionFeedbackScale);
+	}
+
+	UFUNCTION(BlueprintPure, Category = "Kawaii Physics", meta=(BlueprintThreadSafe))
+	static float GetBoneConstraintSubdivisionFeedbackScale(const FKawaiiPhysicsReference& KawaiiPhysics)
+	{
+		KAWAIIPHYSICS_VALUE_GETTER(float, BoneConstraintSubdivisionFeedbackScale);
 	}
 
 	/** TeleportDistanceThreshold */
@@ -574,7 +649,7 @@ ValueType UKawaiiPhysicsLibrary::GetExternalForceProperty(EKawaiiPhysicsAccessEx
                                                           const FKawaiiPhysicsReference& KawaiiPhysics,
                                                           int ExternalForceIndex, FName PropertyName)
 {
-	ValueType Result;
+	ValueType Result{};
 	ExecResult = EKawaiiPhysicsAccessExternalForceResult::NotValid;
 
 	KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(
@@ -640,7 +715,7 @@ ValueType UKawaiiPhysicsLibrary::GetExternalForceStructProperty(EKawaiiPhysicsAc
                                                                 const FKawaiiPhysicsReference& KawaiiPhysics,
                                                                 int ExternalForceIndex, FName PropertyName)
 {
-	ValueType Result;
+	ValueType Result{};
 	ExecResult = EKawaiiPhysicsAccessExternalForceResult::NotValid;
 
 	KawaiiPhysics.CallAnimNodeFunction<FAnimNode_KawaiiPhysics>(

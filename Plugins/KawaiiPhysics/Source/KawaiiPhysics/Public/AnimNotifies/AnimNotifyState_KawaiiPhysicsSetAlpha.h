@@ -18,7 +18,7 @@ enum class EKawaiiPhysicsSetAlphaSource : uint8
  * ABPに配置されたKawaiiPhysicsノードのAlphaをNotifyState区間中だけ上書きします。
  * 目的: アニメカーブの値でKawaiiPhysicsのかかり具合をアニメ中に調整する
  */
-UCLASS(Blueprintable, meta = (DisplayName = "KawaiiPhyiscs: Set Alpha (Override)"))
+UCLASS(Blueprintable, meta = (DisplayName = "KawaiiPhysics: Set Alpha (Override)"))
 class KAWAIIPHYSICS_API UAnimNotifyState_KawaiiPhysicsSetAlpha : public UAnimNotifyState
 {
 	GENERATED_BODY()

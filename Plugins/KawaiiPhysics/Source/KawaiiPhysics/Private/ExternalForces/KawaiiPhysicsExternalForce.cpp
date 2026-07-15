@@ -42,7 +42,7 @@ void FKawaiiPhysics_ExternalForce::PostApply(FAnimNode_KawaiiPhysics& Node, FCom
 		Node.ExternalForces.RemoveAll([&](FInstancedStruct& InstancedStruct)
 		{
 			const auto* ExternalForcePtr = InstancedStruct.GetMutablePtr<FKawaiiPhysics_ExternalForce>();
-			return ExternalForcePtr == this;
+			return ExternalForcePtr && ExternalForcePtr == this;
 		});
 	}
 }
@@ -70,13 +70,20 @@ void FKawaiiPhysics_ExternalForce::AnimDrawDebug(FKawaiiPhysicsModifyBone& Bone,
 {
 	if (IsDebugEnabled() && !Force.IsZero())
 	{
+		// BoneForceMapに該当ボーンが無い場合はnull参照を避ける（EditMode版と同様にガード）
+		const FVector* ForcePtr = BoneForceMap.Find(Bone.BoneRef.BoneName);
+		if (!ForcePtr)
+		{
+			return;
+		}
+
 		const auto AnimInstanceProxy = PoseContext.AnimInstanceProxy;
 		const FVector ModifyRootBoneLocationWS = AnimInstanceProxy->GetComponentTransform().TransformPosition(
 			Bone.Location);
 
 		AnimInstanceProxy->AnimDrawDebugDirectionalArrow(
 			ModifyRootBoneLocationWS + DebugArrowOffset,
-			ModifyRootBoneLocationWS + DebugArrowOffset + BoneForceMap.Find(Bone.BoneRef.BoneName)->GetSafeNormal() *
+			ModifyRootBoneLocationWS + DebugArrowOffset + ForcePtr->GetSafeNormal() *
 			DebugArrowLength,
 			DebugArrowSize, FColor::Red, false, 0.f, 2);
 	}

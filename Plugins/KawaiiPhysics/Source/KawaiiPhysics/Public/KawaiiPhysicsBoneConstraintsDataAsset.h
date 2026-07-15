@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "AnimNode_KawaiiPhysics.h"
+#include "KawaiiPhysicsBoneConstraintTypes.h"
 #include "Engine/DataAsset.h"
 #include "Interfaces/Interface_BoneReferenceSkeletonProvider.h"
 #include "KawaiiPhysicsBoneConstraintsDataAsset.generated.h"
@@ -38,6 +38,13 @@ struct KAWAIIPHYSICS_API FModifyBoneConstraintData
 	/** The compliance type to use if overriding */
 	UPROPERTY(EditAnywhere, category = "KawaiiPhysics", meta=(EditCondition="bOverrideCompliance"))
 	EXPBDComplianceType ComplianceType = EXPBDComplianceType::Leather;
+
+	/**
+	 * このConstraintをBoneConstraintSubdivisionの対象から除外する（構造/対角Constraint用のオプトアウト）
+	 * Exclude this constraint from BoneConstraintSubdivision (opt-out for structural/diagonal constraints).
+	 */
+	UPROPERTY(EditAnywhere, category = "KawaiiPhysics")
+	bool bExcludeFromSubdivision = false;
 
 	/**
 	 * Updates the bone constraint data with the given constraint.

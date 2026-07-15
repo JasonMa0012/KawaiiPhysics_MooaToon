@@ -21,19 +21,21 @@ public class KawaiiPhysicsEd : ModuleRules
 			"UnrealEd",
 			"AnimGraphRuntime",
 			"Slate",
-			"SlateCore"
+			"SlateCore",
+			"DeveloperSettings"
 		});
 
 		if(Target.Version.MajorVersion >= 5)
 		{
 			PrivateDependencyModuleNames.Add("EditorFramework");
-			if (Target.Version.MinorVersion >= 1)
+			// AnimationEditMode was split into its own module starting from 5.1
+			if (Target.Version.MajorVersion > 5 || Target.Version.MinorVersion >= 1)
 			{
 				PrivateDependencyModuleNames.Add("AnimationEditMode");
 			}
 
 			// StructUtils plugin has been integrated into the engine starting from 5.5
-			if (Target.Version.MinorVersion <= 4)
+			if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion <= 4)
 			{
 				PrivateDependencyModuleNames.Add("StructUtils");
 			}

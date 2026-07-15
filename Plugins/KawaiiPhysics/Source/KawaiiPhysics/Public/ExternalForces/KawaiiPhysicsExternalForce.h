@@ -7,7 +7,7 @@
 #include "SceneManagement.h"
 #include "Curves/CurveVector.h"
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 6
+#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 #include "Components/SkeletalMeshComponent.h"
 #endif
 
@@ -19,11 +19,11 @@
 UENUM(BlueprintType)
 enum class EExternalForceSpace : uint8
 {
-	/** Simulate in component space. Moving the entire skeletal mesh will have no affect on velocities */
+	/** Simulate in component space. Moving the entire skeletal mesh will have no effect on velocities */
 	ComponentSpace,
 	/** Simulate in world space. Moving the skeletal mesh will generate velocity changes */
 	WorldSpace,
-	/** Simulate in another bone space. Moving the entire skeletal mesh and individually modifying the base bone will have no affect on velocities */
+	/** Simulate in another bone space. Moving the entire skeletal mesh and individually modifying the base bone will have no effect on velocities */
 	BoneSpace,
 };
 
@@ -60,8 +60,8 @@ struct KAWAIIPHYSICS_API FKawaiiPhysics_ExternalForce
 	bool bDrawDebug = false;
 
 	/** 
-	* 外力を適応するボーンを指定（＝指定しなかったボーンには適応しない）
-	* 空の場合、全ての物理対象のボーンに適応
+	* 外力を適用するボーンを指定（＝指定しなかったボーンには適用しない）
+	* 空の場合、全ての物理対象のボーンに適用
 	* Specify the bones to which the external force will be applied (= the force will not be applied to bones that are not specified)
 	* If empty, it will be applied to all physical target bones
 	*/
@@ -69,8 +69,8 @@ struct KAWAIIPHYSICS_API FKawaiiPhysics_ExternalForce
 	TArray<FBoneReference> ApplyBoneFilter;
 
 	/** 
-	* 外力を適応しないボーンを指定
-	* Specify the bones to which the external force will be NOT applied
+	* 外力を適用しないボーンを指定
+	* Specify the bones to which the external force will NOT be applied
 	*/
 	UPROPERTY(EditAnywhere, meta=(DisplayPriority=1), Category="KawaiiPhysics|ExternalForce")
 	TArray<FBoneReference> IgnoreBoneFilter;

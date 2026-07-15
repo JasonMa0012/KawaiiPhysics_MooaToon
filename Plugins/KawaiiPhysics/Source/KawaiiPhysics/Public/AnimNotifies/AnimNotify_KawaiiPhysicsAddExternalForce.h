@@ -1,4 +1,4 @@
-﻿// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
+// Copyright 2019-2026 pafuhana1213. All Rights Reserved.
 
 #pragma once
 
@@ -6,7 +6,7 @@
 #include "GameplayTagContainer.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 5
+#if !UE_VERSION_OLDER_THAN(5, 5, 0)
 #include "StructUtils/InstancedStruct.h"
 #else
 #include "InstancedStruct.h"
@@ -15,39 +15,20 @@
 #include "AnimNotify_KawaiiPhysicsAddExternalForce.generated.h"
 
 /**
- * UAnimNotify_KawaiiPhysicsAddExternalForce
- *
- * This class represents an animation notify that adds external forces to a skeletal mesh component
- * during an animation sequence. It inherits from UAnimNotify and provides functionality to add and remove
- * external forces when the notify is triggered.
+ * 単発の AnimNotify で KawaiiPhysics に外力を追加する（タグでフィルタ可能）。
+ * AnimNotify that adds external forces to KawaiiPhysics nodes when triggered (filterable by tag).
  */
-UCLASS(Blueprintable, meta = (DisplayName = "KawaiiPhyiscs: Add ExternalForce"))
+UCLASS(Blueprintable, meta = (DisplayName = "KawaiiPhysics: Add ExternalForce"))
 class KAWAIIPHYSICS_API UAnimNotify_KawaiiPhysicsAddExternalForce : public UAnimNotify
 {
 	GENERATED_BODY()
 
 public:
-	/**
-	 * Constructor for UAnimNotify_KawaiiPhysicsAddExternalForce.
-	 *
-	 * @param ObjectInitializer - The object initializer for this class.
-	 */
 	UAnimNotify_KawaiiPhysicsAddExternalForce(const FObjectInitializer& ObjectInitializer);
 
-	/**
-	 * Gets the name of the notify.
-	 *
-	 * @return The name of the notify as a string.
-	 */
 	virtual FString GetNotifyName_Implementation() const override;
 
-	/**
-	 * Called when the animation notify is triggered.
-	 *
-	 * @param MeshComp - The skeletal mesh component.
-	 * @param Animation - The animation sequence.
-	 * @param EventReference - The event reference.
-	 */
+	/** トリガー時に外力を追加 / Adds the external forces when the notify fires. */
 	virtual void Notify(USkeletalMeshComponent* MeshComp, UAnimSequenceBase* Animation,
 	                    const FAnimNotifyEventReference& EventReference) override;
 

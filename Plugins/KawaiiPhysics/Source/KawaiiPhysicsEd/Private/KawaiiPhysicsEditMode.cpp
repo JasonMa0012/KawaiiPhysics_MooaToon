@@ -5,15 +5,17 @@
 #include "CanvasTypes.h"
 #include "EditorModeManager.h"
 #include "EditorViewportClient.h"
+#include "Engine/Engine.h"
 #include "IPersonaPreviewScene.h"
 #include "KawaiiPhysics.h"
 #include "ExternalForces/KawaiiPhysicsExternalForce.h"
 #include "KawaiiPhysicsLimitsDataAsset.h"
+#include "ScopedTransaction.h"
 #include "SceneManagement.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
-#if ENGINE_MAJOR_VERSION >= 5 && ENGINE_MINOR_VERSION >= 6
+#if !UE_VERSION_OLDER_THAN(5, 6, 0)
 #include "SceneView.h"
 #endif
 
@@ -78,6 +80,7 @@ void FKawaiiPhysicsEditMode::EnterMode(UAnimGraphNode_Base* InEditorNode, FAnimN
 		LimitsDataAssetPropertyDelegateHandle =
 			RuntimeNode->LimitsDataAsset->OnLimitsChanged.AddRaw(
 				this, &FKawaiiPhysicsEditMode::OnLimitDataAssetPropertyChange);
+		BoundLimitsDataAsset = RuntimeNode->LimitsDataAsset;
 	}
 
 	UMaterialInterface* BaseElemSelectedMaterial = LoadObject<UMaterialInterface>(
@@ -93,10 +96,13 @@ void FKawaiiPhysicsEditMode::EnterMode(UAnimGraphNode_Base* InEditorNode, FAnimN
 void FKawaiiPhysicsEditMode::ExitMode()
 {
 	GraphNode->OnNodePropertyChanged().Remove(NodePropertyDelegateHandle);
-	if (RuntimeNode->LimitsDataAsset)
+	// bind時のアセット基準で外す（実行中にLimitsDataAssetが差し替わっていても確実にRemoveできる）
+	if (UKawaiiPhysicsLimitsDataAsset* BoundAsset = BoundLimitsDataAsset.Get())
 	{
-		RuntimeNode->LimitsDataAsset->OnLimitsChanged.Remove(LimitsDataAssetPropertyDelegateHandle);
+		BoundAsset->OnLimitsChanged.Remove(LimitsDataAssetPropertyDelegateHandle);
 	}
+	BoundLimitsDataAsset = nullptr;
+	LimitsDataAssetPropertyDelegateHandle.Reset();
 
 	GraphNode = nullptr;
 	RuntimeNode = nullptr;
@@ -108,8 +114,14 @@ void FKawaiiPhysicsEditMode::Render(const FSceneView* View, FViewport* Viewport,
 {
 	const USkeletalMeshComponent* SkelMeshComp = GetAnimPreviewScene().GetPreviewMeshComponent();
 
+	if (!RuntimeNode || !GraphNode)
+	{
+		FAnimNodeEditMode::Render(View, Viewport, PDI);
+		return;
+	}
+
 	if (SkelMeshComp && SkelMeshComp->GetSkeletalMeshAsset() && SkelMeshComp->GetSkeletalMeshAsset()->GetSkeleton() &&
-		FAnimWeight::IsRelevant(RuntimeNode->GetAlpha() && RuntimeNode->IsRecentlyEvaluated()))
+		FAnimWeight::IsRelevant(RuntimeNode->GetAlpha()) && RuntimeNode->IsRecentlyEvaluated())
 	{
 		RenderModifyBones(PDI);
 		RenderLimitAngle(PDI);
@@ -173,7 +185,9 @@ void FKawaiiPhysicsEditMode::RenderModifyBones(FPrimitiveDrawInterface* PDI) con
 
 			if (Bone.PhysicsSettings.Radius > 0)
 			{
-				auto Color = Bone.bDummy ? FColor::Red : FColor::Yellow;
+				auto Color = Bone.bBridgeDummy
+					             ? FColor::Green
+					             : (Bone.bInterBoneDummy ? FColor::Cyan : (Bone.bDummy ? FColor::Red : FColor::Yellow));
 				DrawWireSphere(PDI, BoneLocation, Color, Bone.PhysicsSettings.Radius, 16, SDPG_Foreground);
 			}
 
@@ -525,7 +539,9 @@ void FKawaiiPhysicsEditMode::RenderBoneConstraint(FPrimitiveDrawInterface* PDI) 
 	{
 		for (const FModifyBoneConstraint& BoneConstraint : RuntimeNode->MergedBoneConstraints)
 		{
-			if (BoneConstraint.IsBoneReferenceValid() && !RuntimeNode->ModifyBones.IsEmpty())
+			if (BoneConstraint.IsBoneReferenceValid() && !RuntimeNode->ModifyBones.IsEmpty() &&
+				RuntimeNode->ModifyBones.IsValidIndex(BoneConstraint.ModifyBoneIndex1) &&
+				RuntimeNode->ModifyBones.IsValidIndex(BoneConstraint.ModifyBoneIndex2))
 			{
 				FTransform BoneTransform1 = FTransform(
 					RuntimeNode->ModifyBones[BoneConstraint.ModifyBoneIndex1].PrevRotation,
@@ -563,15 +579,20 @@ void FKawaiiPhysicsEditMode::RenderExternalForces(FPrimitiveDrawInterface* PDI) 
 {
 	if (GraphNode->bEnableDebugDrawExternalForce)
 	{
-		for (const auto& Bone : RuntimeNode->ModifyBones)
+		for (auto& Force : RuntimeNode->ExternalForces)
 		{
-			for (auto& Force : RuntimeNode->ExternalForces)
+			if (!Force.IsValid())
 			{
-				if (Force.IsValid())
-				{
-					Force.GetMutablePtr<FKawaiiPhysics_ExternalForce>()->AnimDrawDebugForEditMode(
-						Bone, *RuntimeNode, PDI);
-				}
+				continue;
+			}
+			FKawaiiPhysics_ExternalForce* ForcePtr = Force.GetMutablePtr<FKawaiiPhysics_ExternalForce>();
+			if (!ForcePtr)
+			{
+				continue;
+			}
+			for (const auto& Bone : RuntimeNode->ModifyBones)
+			{
+				ForcePtr->AnimDrawDebugForEditMode(Bone, *RuntimeNode, PDI);
 			}
 		}
 	}
@@ -657,12 +678,19 @@ bool FKawaiiPhysicsEditMode::HandleClick(FEditorViewportClient* InViewportClient
 		SelectCollisionType = KawaiiPhysicsHitProxy->CollisionType;
 		SelectCollisionIndex = KawaiiPhysicsHitProxy->CollisionIndex;
 		SelectCollisionSourceType = KawaiiPhysicsHitProxy->SourceType;
+		// 選択確定時のGuidを保持する（削除はこのGuidで対象を引き、クリック後に配列が変化しても誤削除しない）
+		SelectedCollisionGuid = FGuid();
+		if (const FCollisionLimitBase* Selected = GetSelectCollisionLimitRuntime())
+		{
+			SelectedCollisionGuid = Selected->Guid;
+		}
 		bResult = true;
 	}
 	else
 	{
 		SelectCollisionType = ECollisionLimitType::None;
 		SelectCollisionIndex = -1;
+		SelectedCollisionGuid = FGuid();
 	}
 
 	return bResult;
@@ -689,59 +717,141 @@ bool FKawaiiPhysicsEditMode::InputKey(FEditorViewportClient* InViewportClient, F
 		else if (InKey == EKeys::Delete && SelectCollisionSourceType != ECollisionSourceType::PhysicsAsset &&
 			IsValidSelectCollision())
 		{
-			switch (SelectCollisionType)
-			{
-			case ECollisionLimitType::Spherical:
-				if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
-				{
-					RuntimeNode->LimitsDataAsset->SphericalLimits.RemoveAt(SelectCollisionIndex);
-					RuntimeNode->LimitsDataAsset->MarkPackageDirty();
-				}
-				else
-				{
-					RuntimeNode->SphericalLimits.RemoveAt(SelectCollisionIndex);
-					GraphNode->Node.SphericalLimits.RemoveAt(SelectCollisionIndex);
-				}
-				break;
-			case ECollisionLimitType::Capsule:
-				if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
-				{
-					RuntimeNode->LimitsDataAsset->CapsuleLimits.RemoveAt(SelectCollisionIndex);
-					RuntimeNode->LimitsDataAsset->MarkPackageDirty();
-				}
-				else
-				{
-					RuntimeNode->CapsuleLimits.RemoveAt(SelectCollisionIndex);
-					GraphNode->Node.CapsuleLimits.RemoveAt(SelectCollisionIndex);
-				}
-				break;
-			case ECollisionLimitType::Box:
-				if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
-				{
-					RuntimeNode->LimitsDataAsset->BoxLimits.RemoveAt(SelectCollisionIndex);
-					RuntimeNode->LimitsDataAsset->MarkPackageDirty();
-				}
-				else
-				{
-					RuntimeNode->BoxLimits.RemoveAt(SelectCollisionIndex);
-					GraphNode->Node.BoxLimits.RemoveAt(SelectCollisionIndex);
-				}
-				break;
+			const bool bFromDataAsset = (SelectCollisionSourceType == ECollisionSourceType::DataAsset);
+			UKawaiiPhysicsLimitsDataAsset* LimitsDataAsset = RuntimeNode->LimitsDataAsset;
 
-			case ECollisionLimitType::Planar:
-				if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
+			// DataAsset由来なのにアセットが無効なら何もしない（null deref回避）
+			if (!bFromDataAsset || LimitsDataAsset)
+			{
+				// Undo可能にするためTransactionで包み、編集対象にModify()を呼ぶ
+				const FScopedTransaction Transaction(
+					LOCTEXT("DeleteKawaiiCollision", "Delete KawaiiPhysics Collision"));
+				if (bFromDataAsset)
 				{
-					RuntimeNode->LimitsDataAsset->PlanarLimits.RemoveAt(SelectCollisionIndex);
-					RuntimeNode->LimitsDataAsset->MarkPackageDirty();
+					LimitsDataAsset->Modify();
 				}
 				else
 				{
-					RuntimeNode->PlanarLimits.RemoveAt(SelectCollisionIndex);
-					GraphNode->Node.PlanarLimits.RemoveAt(SelectCollisionIndex);
+					GraphNode->Modify();
 				}
-				break;
-			case ECollisionLimitType::None: break;
-			default: ;
+
+				// 削除対象の解決: PreferredIndex(クリック時index)がまだ選択Guidの行を指せばそれを採用し（重複Guidでも
+				// クリック行を正確に特定）、stale化していればGuidで引き直す。INDEX_NONE時はGuid一致のみ。
+				auto ResolveIndex = [&](auto& Array, int32 PreferredIndex, const FGuid& Guid) -> int32
+				{
+					if (Array.IsValidIndex(PreferredIndex) &&
+						(!Guid.IsValid() || Array[PreferredIndex].Guid == Guid))
+					{
+						return PreferredIndex;
+					}
+					if (Guid.IsValid())
+					{
+						return Array.IndexOfByPredicate(
+							[&Guid](const FCollisionLimitBase& Limit) { return Limit.Guid == Guid; });
+					}
+					return INDEX_NONE;
+				};
+
+				// DataAsset由来: SelectCollisionIndexはマージ済みキャッシュ(PhysicsAsset混在)上の位置。runtime/graphは
+				// その位置を起点に、アセット配列はマージindexを流用できないためGuidで対応エントリを引いて各1件削除する。
+				auto RemoveDataAssetLimit = [&](auto& RuntimeMerged, auto& AssetArray, auto& GraphMerged)
+				{
+					const int32 RuntimeIndex = ResolveIndex(RuntimeMerged, SelectCollisionIndex, SelectedCollisionGuid);
+					// 対象が見つからない/DataAsset由来でなければ何もしない（source不一致のstale選択を弾く）
+					if (RuntimeIndex == INDEX_NONE ||
+						RuntimeMerged[RuntimeIndex].SourceType != ECollisionSourceType::DataAsset)
+					{
+						return;
+					}
+					const FGuid TargetGuid = RuntimeMerged[RuntimeIndex].Guid;
+
+					const int32 AssetIndex = ResolveIndex(AssetArray, INDEX_NONE, TargetGuid);
+					if (AssetIndex != INDEX_NONE)
+					{
+						AssetArray.RemoveAt(AssetIndex);
+						LimitsDataAsset->MarkPackageDirty();
+					}
+					RuntimeMerged.RemoveAt(RuntimeIndex);
+					const int32 GraphIndex = ResolveIndex(GraphMerged, SelectCollisionIndex, TargetGuid);
+					if (GraphIndex != INDEX_NONE)
+					{
+						GraphMerged.RemoveAt(GraphIndex);
+					}
+				};
+
+				// AnimNode由来: SelectCollisionIndexはそのまま*Limits配列の位置。runtime/graphとも同じ解決で1件削除。
+				auto RemoveAnimNodeLimit = [&](auto& RuntimeArray, auto& GraphArray)
+				{
+					const int32 RuntimeIndex = ResolveIndex(RuntimeArray, SelectCollisionIndex, SelectedCollisionGuid);
+					if (RuntimeIndex == INDEX_NONE)
+					{
+						return;
+					}
+					const FGuid TargetGuid = RuntimeArray[RuntimeIndex].Guid;
+					RuntimeArray.RemoveAt(RuntimeIndex);
+					const int32 GraphIndex = ResolveIndex(GraphArray, SelectCollisionIndex, TargetGuid);
+					if (GraphIndex != INDEX_NONE)
+					{
+						GraphArray.RemoveAt(GraphIndex);
+					}
+				};
+
+				switch (SelectCollisionType)
+				{
+				case ECollisionLimitType::Spherical:
+					if (bFromDataAsset)
+					{
+						RemoveDataAssetLimit(RuntimeNode->SphericalLimitsData, LimitsDataAsset->SphericalLimits,
+						                     GraphNode->Node.SphericalLimitsData);
+					}
+					else
+					{
+						RemoveAnimNodeLimit(RuntimeNode->SphericalLimits, GraphNode->Node.SphericalLimits);
+					}
+					break;
+				case ECollisionLimitType::Capsule:
+					if (bFromDataAsset)
+					{
+						RemoveDataAssetLimit(RuntimeNode->CapsuleLimitsData, LimitsDataAsset->CapsuleLimits,
+						                     GraphNode->Node.CapsuleLimitsData);
+					}
+					else
+					{
+						RemoveAnimNodeLimit(RuntimeNode->CapsuleLimits, GraphNode->Node.CapsuleLimits);
+					}
+					break;
+				case ECollisionLimitType::Box:
+					if (bFromDataAsset)
+					{
+						RemoveDataAssetLimit(RuntimeNode->BoxLimitsData, LimitsDataAsset->BoxLimits,
+						                     GraphNode->Node.BoxLimitsData);
+					}
+					else
+					{
+						RemoveAnimNodeLimit(RuntimeNode->BoxLimits, GraphNode->Node.BoxLimits);
+					}
+					break;
+
+				case ECollisionLimitType::Planar:
+					if (bFromDataAsset)
+					{
+						RemoveDataAssetLimit(RuntimeNode->PlanarLimitsData, LimitsDataAsset->PlanarLimits,
+						                     GraphNode->Node.PlanarLimitsData);
+					}
+					else
+					{
+						RemoveAnimNodeLimit(RuntimeNode->PlanarLimits, GraphNode->Node.PlanarLimits);
+					}
+					break;
+				case ECollisionLimitType::None: break;
+				default: ;
+				}
+
+				// 削除後は選択indexが縮んだ配列の別要素を指すため無効化する
+				SelectCollisionIndex = -1;
+				SelectCollisionType = ECollisionLimitType::None;
+				SelectCollisionSourceType = ECollisionSourceType::AnimNode;
+				SelectedCollisionGuid = FGuid();
 			}
 		}
 	}
@@ -763,12 +873,22 @@ void FKawaiiPhysicsEditMode::OnExternalNodePropertyChange(FPropertyChangedEvent&
 		CurWidgetMode = UE_WIDGET::EWidgetMode::WM_None;
 	}
 
-	if (InPropertyEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(FAnimNode_KawaiiPhysics, LimitsDataAsset))
+	if (InPropertyEvent.Property &&
+		InPropertyEvent.Property->GetFName() == GET_MEMBER_NAME_CHECKED(FAnimNode_KawaiiPhysics, LimitsDataAsset))
 	{
+		// LimitsDataAsset差し替え時は旧アセットのdelegateを外してから新アセットへbindし直す（多重bind/解放後通知を防ぐ）
+		if (UKawaiiPhysicsLimitsDataAsset* OldAsset = BoundLimitsDataAsset.Get())
+		{
+			OldAsset->OnLimitsChanged.Remove(LimitsDataAssetPropertyDelegateHandle);
+		}
+		LimitsDataAssetPropertyDelegateHandle.Reset();
+		BoundLimitsDataAsset = nullptr;
+
 		if (RuntimeNode->LimitsDataAsset)
 		{
-			RuntimeNode->LimitsDataAsset->OnLimitsChanged.AddRaw(
+			LimitsDataAssetPropertyDelegateHandle = RuntimeNode->LimitsDataAsset->OnLimitsChanged.AddRaw(
 				this, &FKawaiiPhysicsEditMode::OnLimitDataAssetPropertyChange);
+			BoundLimitsDataAsset = RuntimeNode->LimitsDataAsset;
 		}
 	}
 }
@@ -936,7 +1056,8 @@ void FKawaiiPhysicsEditMode::DoTranslation(FVector& InTranslation)
 	CollisionRuntime->OffsetLocation += Offset;
 	CollisionGraph->OffsetLocation = CollisionRuntime->OffsetLocation;
 
-	if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
+	// DataAssetがランタイムでnull化されてもキャッシュ由来の選択は残るため、書き戻し前にnullガード
+	if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
 	{
 		RuntimeNode->LimitsDataAsset->UpdateLimit(CollisionRuntime);
 	}
@@ -977,7 +1098,8 @@ void FKawaiiPhysicsEditMode::DoRotation(FRotator& InRotation)
 	CollisionRuntime->OffsetRotation = FRotator(DeltaQuat * CollisionRuntime->OffsetRotation.Quaternion());
 	CollisionGraph->OffsetRotation = CollisionRuntime->OffsetRotation;
 
-	if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
+	// DataAssetがランタイムでnull化されてもキャッシュ由来の選択は残るため、書き戻し前にnullガード
+	if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
 	{
 		RuntimeNode->LimitsDataAsset->UpdateLimit(CollisionRuntime);
 	}
@@ -1014,7 +1136,7 @@ void FKawaiiPhysicsEditMode::DoScale(FVector& InScale)
 
 		SphericalLimitGraph.Radius = SphericalLimitRuntime.Radius;
 
-		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
+		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
 		{
 			RuntimeNode->LimitsDataAsset->UpdateLimit(&SphericalLimitRuntime);
 		}
@@ -1034,7 +1156,7 @@ void FKawaiiPhysicsEditMode::DoScale(FVector& InScale)
 		CapsuleLimitGraph.Radius = CapsuleLimitRuntime.Radius;
 		CapsuleLimitGraph.Length = CapsuleLimitRuntime.Length;
 
-		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
+		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
 		{
 			RuntimeNode->LimitsDataAsset->UpdateLimit(&CapsuleLimitRuntime);
 		}
@@ -1051,7 +1173,7 @@ void FKawaiiPhysicsEditMode::DoScale(FVector& InScale)
 
 		BoxLimitGraph.Extent = BoxLimitRuntime.Extent;
 
-		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset)
+		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
 		{
 			RuntimeNode->LimitsDataAsset->UpdateLimit(&BoxLimitRuntime);
 		}
@@ -1072,6 +1194,12 @@ bool FKawaiiPhysicsEditMode::ShouldDrawWidget() const
 void FKawaiiPhysicsEditMode::DrawHUD(FEditorViewportClient* ViewportClient, FViewport* Viewport, const FSceneView* View,
                                      FCanvas* Canvas)
 {
+	if (!RuntimeNode || !GraphNode)
+	{
+		FAnimNodeEditMode::DrawHUD(ViewportClient, Viewport, View, Canvas);
+		return;
+	}
+
 	float FontWidth, FontHeight;
 	GEngine->GetSmallFont()->GetCharSize(TEXT('L'), FontWidth, FontHeight);
 	constexpr float XOffset = 5.0f;
