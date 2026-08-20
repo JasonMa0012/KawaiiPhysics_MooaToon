@@ -66,6 +66,9 @@ void UKawaiiPhysicsLimitsDataAsset::UpdateLimit(FCollisionLimitBase* Limit)
 	case ECollisionLimitType::Capsule:
 		UpdateCollisionLimit(CapsuleLimits, *static_cast<FCapsuleLimit*>(Limit));
 		break;
+	case ECollisionLimitType::TaperedCapsule:
+		UpdateCollisionLimit(TaperedCapsuleLimits, *static_cast<FTaperedCapsuleLimit*>(Limit));
+		break;
 	case ECollisionLimitType::Box:
 		UpdateCollisionLimit(BoxLimits, *static_cast<FBoxLimit*>(Limit));
 		break;
@@ -143,6 +146,10 @@ void UKawaiiPhysicsLimitsDataAsset::PostEditChangeChainProperty(FPropertyChanged
 	{
 		UpdateLimits(CapsuleLimits);
 	}
+	else if (ArrayPropertyName == GET_MEMBER_NAME_CHECKED(UKawaiiPhysicsLimitsDataAsset, TaperedCapsuleLimits))
+	{
+		UpdateLimits(TaperedCapsuleLimits);
+	}
 	else if (ArrayPropertyName == GET_MEMBER_NAME_CHECKED(UKawaiiPhysicsLimitsDataAsset, BoxLimits))
 	{
 		UpdateLimits(BoxLimits);
@@ -175,6 +182,7 @@ void UKawaiiPhysicsLimitsDataAsset::EnsureUniqueCollisionGuids()
 	};
 	Dedup(SphericalLimits);
 	Dedup(CapsuleLimits);
+	Dedup(TaperedCapsuleLimits);
 	Dedup(BoxLimits);
 	Dedup(PlanarLimits);
 }

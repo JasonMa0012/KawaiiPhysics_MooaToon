@@ -111,6 +111,82 @@ bool FKawaiiPhysicsCapsuleTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+//  Tapered Capsule
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKawaiiPhysicsTaperedCapsuleTest,
+                                 "KawaiiPhysics.Collision.TaperedCapsulePushOut",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKawaiiPhysicsTaperedCapsuleTest::RunTest(const FString& Parameters)
+{
+	FKawaiiPhysicsTestAccessor A;
+
+	TArray<FTaperedCapsuleLimit> Limits;
+	FTaperedCapsuleLimit TaperedCapsule;
+	TaperedCapsule.Location = FVector::ZeroVector;
+	TaperedCapsule.Rotation = FQuat::Identity;
+	TaperedCapsule.Length = 10.0f;
+	TaperedCapsule.Radius0 = 6.0f; // +Z 端
+	TaperedCapsule.Radius1 = 2.0f; // -Z 端
+	TaperedCapsule.bEnable = true;
+	Limits.Add(TaperedCapsule);
+
+	auto TestPushOut = [&](const TCHAR* CaseName, const FVector& InitialLocation, const FVector& ExpectedLocation)
+	{
+		FKawaiiPhysicsModifyBone Bone = MakeBone(InitialLocation, 3.0f, InitialLocation);
+		A.CallTaperedCapsuleCollision(Bone, Limits);
+		TestTrue(FString::Printf(TEXT("Tapered capsule %s: got %s expected %s"),
+		                         CaseName, *Bone.Location.ToString(), *ExpectedLocation.ToString()),
+		         Bone.Location.Equals(ExpectedLocation, GCollisionTol));
+	};
+
+	// 軸中央 t=0.5: R=Lerp(6,2,0.5)=4, LimitDistance=3+4=7 → (7,0,0)。
+	TestPushOut(TEXT("center t=0.5"), FVector(1, 0, 0), FVector(7, 0, 0));
+
+	// 非対称 t=0.25: R=Lerp(6,2,0.25)=5, LimitDistance=3+5=8 → (8,0,2.5)。
+	TestPushOut(TEXT("asymmetric t=0.25"), FVector(1, 0, 2.5f), FVector(8, 0, 2.5f));
+
+	// +Z 端クランプ: 最近点 (0,0,5), R=Radius0=6, LimitDistance=9 → (0,0,14)。
+	TestPushOut(TEXT("+Z clamp"), FVector(0, 0, 10), FVector(0, 0, 14));
+
+	// -Z 端クランプ: 最近点 (0,0,-5), R=Radius1=2, LimitDistance=5 → (0,0,-10)。
+	TestPushOut(TEXT("-Z clamp"), FVector(0, 0, -8), FVector(0, 0, -10));
+
+	// 非接触: 最近点 (0,0,5), dist=15 > LimitDistance=9 のため不変。
+	TestPushOut(TEXT("outside"), FVector(0, 0, 20), FVector(0, 0, 20));
+
+	FTaperedCapsuleLimit DegenerateCapsule = TaperedCapsule;
+	DegenerateCapsule.Length = 0.0f;
+	TArray<FTaperedCapsuleLimit> DegenerateLimits;
+	DegenerateLimits.Add(DegenerateCapsule);
+
+	// 縮退 Length=0: 球扱い R=Max(6,2)=6, LimitDistance=9 → (9,0,0)。
+	FKawaiiPhysicsModifyBone DegenerateBone = MakeBone(FVector(2, 0, 0), 3.0f, FVector(2, 0, 0));
+	A.CallTaperedCapsuleCollision(DegenerateBone, DegenerateLimits);
+	TestTrue(FString::Printf(TEXT("Tapered capsule degenerate length: got %s expected (9,0,0)"),
+	                         *DegenerateBone.Location.ToString()),
+	         DegenerateBone.Location.Equals(FVector(9, 0, 0), GCollisionTol));
+
+	// 軸上フォールバック: PushDir=Rotation.GetAxisX()、t=0.5, LimitDistance=7 → (7,0,0)。
+	TestPushOut(TEXT("axis fallback"), FVector(0, 0, 0), FVector(7, 0, 0));
+
+	FTaperedCapsuleLimit NegativeEndCapsule = TaperedCapsule;
+	NegativeEndCapsule.Radius0 = -2.0f;
+	NegativeEndCapsule.Radius1 = 6.0f;
+	TArray<FTaperedCapsuleLimit> NegativeEndLimits;
+	NegativeEndLimits.Add(NegativeEndCapsule);
+
+	// 片端負半径: +Z端で t=0, R=Max(Lerp(-2,6,0),0)=0, LimitDistance=3+0=3 → (3,0,5)。
+	FKawaiiPhysicsModifyBone NegativeEndBone = MakeBone(FVector(1, 0, 5), 3.0f, FVector(1, 0, 5));
+	A.CallTaperedCapsuleCollision(NegativeEndBone, NegativeEndLimits);
+	TestTrue(FString::Printf(TEXT("Tapered capsule negative end radius: got %s expected (3,0,5)"),
+	                         *NegativeEndBone.Location.ToString()),
+	         NegativeEndBone.Location.Equals(FVector(3, 0, 5), GCollisionTol));
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 //  Box
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKawaiiPhysicsBoxTest,

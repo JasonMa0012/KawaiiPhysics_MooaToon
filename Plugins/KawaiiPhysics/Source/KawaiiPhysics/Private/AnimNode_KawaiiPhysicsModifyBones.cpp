@@ -57,6 +57,7 @@ void FAnimNode_KawaiiPhysics::InitializeBoneReferences(const FBoneContainer& Req
 
 	Initialize(SphericalLimits);
 	Initialize(CapsuleLimits);
+	Initialize(TaperedCapsuleLimits);
 	Initialize(BoxLimits);
 	Initialize(PlanarLimits);
 
@@ -607,4 +608,3 @@ int32 FAnimNode_KawaiiPhysics::CalcInterBoneDummyCoverageCount(float Distance, f
 
 	return FMath::Max(CoverageCount, 0);
 }
-

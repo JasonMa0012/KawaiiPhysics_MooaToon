@@ -9,6 +9,8 @@
 #include "BoneControllers/AnimNode_AnimDynamics.h"
 #include "BoneControllers/AnimNode_SkeletalControlBase.h"
 #include "Engine/HitResult.h"
+#include "HAL/CriticalSection.h"
+#include "Templates/SharedPointer.h"
 
 #if !UE_VERSION_OLDER_THAN(5, 5, 0)
 #include "StructUtils/InstancedStruct.h"
@@ -31,6 +33,7 @@
 class UKawaiiPhysics_CustomExternalForce;
 class UKawaiiPhysicsLimitsDataAsset;
 class UKawaiiPhysicsBoneConstraintsDataAsset;
+class UMirrorDataTable;
 
 #if ENABLE_ANIM_DEBUG
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsEnable;
@@ -40,6 +43,82 @@ extern KAWAIIPHYSICS_API TAutoConsoleVariable<float> CVarAnimNodeKawaiiPhysicsDe
 #endif
 
 extern KAWAIIPHYSICS_API TAutoConsoleVariable<bool> CVarAnimNodeKawaiiPhysicsUseBoneContainerRefSkeletonWhenInit;
+
+// 一時外力の実体と寿命
+struct FKawaiiPhysicsTransientExternalForce
+{
+	FInstancedStruct Force;
+	float RemainingLifetime = 0.0f;
+	int64 HandleId = 0;
+};
+
+// 一時突風の構築リクエスト
+struct FKawaiiPhysicsTransientGustRequest
+{
+	float Strength = 0.0f;
+	float RiseTime = 0.0f;
+	float DecayTime = 0.0f;
+	float HoldTime = 0.0f;
+	FVector Direction = FVector::ZeroVector;
+	int32 InheritForceIndex = INDEX_NONE;
+	int64 HandleId = 0;
+	bool bRealTimeEnvelope = false;
+};
+
+// 一時外力の停止リクエスト
+struct FKawaiiPhysicsTransientForceStopRequest
+{
+	int64 HandleId = 0;
+	float BlendOutTime = 0.0f;
+};
+
+// 物理設定の一時倍率オーバーライドの構築リクエスト
+struct FKawaiiPhysicsSettingsOverrideRequest
+{
+	FKawaiiPhysicsSettingsScale Scale;
+	float RiseTime = 0.0f;
+	float HoldTime = 0.0f;
+	float DecayTime = 0.0f;
+	int64 HandleId = 0;
+};
+
+// 実行中の物理設定の一時倍率オーバーライド
+struct FKawaiiPhysicsActiveSettingsOverride
+{
+	FKawaiiPhysicsSettingsScale Scale;
+	float RiseTime = 0.0f;
+	float HoldTime = 0.0f;
+	float DecayTime = 0.0f;
+	float ElapsedTime = 0.0f;
+	// 停止時にそれまでの適用率を退避し、そこを起点にフェードアウトさせるための係数
+	float PeakAlpha = 1.0f;
+	int64 HandleId = 0;
+};
+
+// 任意スレッドからの一時外力キュー
+struct FKawaiiPhysicsTransientForceQueue
+{
+	FCriticalSection Mutex;
+	TArray<FKawaiiPhysicsTransientExternalForce> PendingForces;
+	TArray<FKawaiiPhysicsTransientGustRequest> PendingGusts;
+	TArray<FKawaiiPhysicsTransientForceStopRequest> PendingStops;
+	TArray<FKawaiiPhysicsSettingsOverrideRequest> PendingSettingsOverrides;
+	TArray<FKawaiiPhysicsTransientForceStopRequest> PendingSettingsOverrideStops;
+};
+
+// worker専用ストアと共有キュー
+struct FKawaiiPhysicsTransientForceStore
+{
+	TArray<FKawaiiPhysicsTransientExternalForce> Items;
+	TArray<FKawaiiPhysicsActiveSettingsOverride> SettingsOverrideItems;
+	TSharedPtr<FKawaiiPhysicsTransientForceQueue, ESPMode::ThreadSafe> Queue =
+		MakeShared<FKawaiiPhysicsTransientForceQueue, ESPMode::ThreadSafe>();
+
+	FKawaiiPhysicsTransientForceStore() = default;
+	// コピー先は独立した空ストアにして二重消費を避ける
+	FKawaiiPhysicsTransientForceStore(const FKawaiiPhysicsTransientForceStore&) : FKawaiiPhysicsTransientForceStore() {}
+	FKawaiiPhysicsTransientForceStore& operator=(const FKawaiiPhysicsTransientForceStore&) { return *this; }
+};
 
 USTRUCT(BlueprintType)
 struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalControlBase
@@ -177,6 +256,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 		meta = (PinHiddenByDefault, EditCondition="bNeedWarmUp"))
 	bool bUseWarmUpWhenResetDynamics = true;
 
+	/** 物理の空回し（ウォームアップ）を行うフラグ / Flag to warm up the physics simulation */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings",
 		meta = (PinHiddenByDefault, InlineEditConditionToggle))
 	bool bNeedWarmUp = false;
@@ -234,7 +314,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/Damping parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves",
 		meta = (PinHiddenByDefault, DisplayName = "Damping Rate by Bone Length Rate"))
 	FRuntimeFloatCurve DampingCurveData;
 
@@ -244,7 +324,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/Stiffness parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves",
 		meta = (PinHiddenByDefault, DisplayName = "Stiffness Rate by Bone Length Rate"))
 	FRuntimeFloatCurve StiffnessCurveData;
 
@@ -256,7 +336,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* ※基となる値の意味は WorldDampingLocation を参照（大きいほど移動量を抑制 = 反映率は 1 - 値）
 	* Note: see WorldDampingLocation for the base value's meaning (higher = more suppression; reflection factor = 1 - value).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves",
 		meta = (PinHiddenByDefault, DisplayName = "World Damping Location Rate by Bone Length Rate"))
 	FRuntimeFloatCurve WorldDampingLocationCurveData;
 
@@ -268,7 +348,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* ※基となる値の意味は WorldDampingRotation を参照（大きいほど回転量を抑制 = 反映率は 1 - 値）
 	* Note: see WorldDampingRotation for the base value's meaning (higher = more suppression; reflection factor = 1 - value).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves",
 		meta = (PinHiddenByDefault, DisplayName = "World Damping Rotation Rate by Bone Length Rate"))
 	FRuntimeFloatCurve WorldDampingRotationCurveData;
 
@@ -278,7 +358,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/CollisionRadius parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves",
 		meta = (PinHiddenByDefault, DisplayName = "Radius Rate by Bone Length Rate"))
 	FRuntimeFloatCurve RadiusCurveData;
 
@@ -288,7 +368,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Corrects the Physics Settings/LimitAngle parameters applied to each bone.
 	* Multiplies each parameter by the curve value for "Length from RootBone to specific bone / Length from RootBone to end bone" (0.0~1.0).
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves", AdvancedDisplay,
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings|Curves",
 		meta = (PinHiddenByDefault, DisplayName = "LimitAngle Rate by Bone Length Rate"))
 	FRuntimeFloatCurve LimitAngleCurveData;
 
@@ -296,71 +376,97 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* コリジョン（球）
 	* Spherical Collision
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits")
+	UPROPERTY(EditAnywhere, Category = "Collision", meta = (DisplayName = "Spherical Collision"))
 	TArray<FSphericalLimit> SphericalLimits;
 	/** 
 	* コリジョン（カプセル）
 	* Capsule Collision
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits")
+	UPROPERTY(EditAnywhere, Category = "Collision", meta = (DisplayName = "Capsule Collision"))
 	TArray<FCapsuleLimit> CapsuleLimits;
+	/**
+	* コリジョン（テーパードカプセル）
+	* Tapered Capsule Collision
+	*/
+	UPROPERTY(EditAnywhere, Category = "Collision", meta = (DisplayName = "Tapered Capsule Collision"))
+	TArray<FTaperedCapsuleLimit> TaperedCapsuleLimits;
 	/** 
 	* コリジョン（ボックス）
 	* Box Collision
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits")
+	UPROPERTY(EditAnywhere, Category = "Collision", meta = (DisplayName = "Box Collision"))
 	TArray<FBoxLimit> BoxLimits;
 	/** 
 	* コリジョン（平面）
 	* Planar Collision
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits")
+	UPROPERTY(EditAnywhere, Category = "Collision", meta = (DisplayName = "Planar Collision"))
 	TArray<FPlanarLimit> PlanarLimits;
 
 	/** 
 	* コリジョン設定（DataAsset版）。別AnimNode・ABPで設定を流用したい場合はこちらを推奨
 	* Collision settings (DataAsset version). This is recommended if you want to reuse the settings for another AnimNode or ABP.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (PinHiddenByDefault, DisplayName = "Collision Data Asset"))
 	TObjectPtr<UKawaiiPhysicsLimitsDataAsset> LimitsDataAsset = nullptr;
 
 	/** 
 	* コリジョン設定（PhysicsAsset版）。別AnimNode・ABPで設定を流用したい場合はこちらを推奨
 	* Collision settings (PhysicsAsset). This is recommended if you want to reuse the settings for another AnimNode or ABP.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (PinHiddenByDefault, DisplayName = "Physics Asset for Collision"))
 	TObjectPtr<UPhysicsAsset> PhysicsAssetForLimits = nullptr;
 
-	/** 
+	/**
+	* コリジョンのミラーリング設定。設定すると既存コリジョン（AnimNode直値 / DataAsset / PhysicsAsset）をMirrorDataTableで解決したミラー先ボーンへ自動複製（中央ボーンはスキップ）
+	* Mirroring source for collisions. If set, existing collisions are automatically duplicated onto the mirrored bones resolved via the MirrorDataTable (center bones are skipped).
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision", meta = (PinHiddenByDefault, DisplayName = "Mirror Data Table for Collision"))
+	TObjectPtr<UMirrorDataTable> MirrorDataTableForLimits = nullptr;
+
+	/**
+	* ONの場合、ミラー先ボーンに同形状タイプのコリジョン（Mirror由来を除く）が既にあればミラー生成をスキップ
+	* If true, skip generating a mirrored collision when the mirrored bone already has a collision of the same shape type (excluding Mirror-sourced ones).
+	*/
+	UPROPERTY(EditAnywhere, Category = "Collision", meta = (PinHiddenByDefault))
+	bool bSkipMirroredBoneWithExistingCollision = true;
+
+	/**
 	* コリジョン設定（DataAsset版）における球コリジョンのプレビュー
 	* Preview of sphere collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Collision", meta = (DisplayName = "Spherical Collision Data"))
 	TArray<FSphericalLimit> SphericalLimitsData;
 	/** 
 	* コリジョン設定（DataAsset版）におけるカプセルコリジョンのプレビュー
 	* Preview of capsule collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Collision", meta = (DisplayName = "Capsule Collision Data"))
 	TArray<FCapsuleLimit> CapsuleLimitsData;
+	/**
+	* コリジョン設定（DataAsset版）におけるテーパードカプセルコリジョンのプレビュー
+	* Preview of tapered capsule collision in collision settings (DataAsset version)
+	*/
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Collision", meta = (DisplayName = "Tapered Capsule Collision Data"))
+	TArray<FTaperedCapsuleLimit> TaperedCapsuleLimitsData;
 	/** 
 	* コリジョン設定（DataAsset版）におけるボックスコリジョンのプレビュー
 	* Preview of box collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Collision", meta = (DisplayName = "Box Collision Data"))
 	TArray<FBoxLimit> BoxLimitsData;
 	/** 
 	* コリジョン設定（DataAsset版）における平面コリジョンのプレビュー
 	* Preview of planar collision in collision settings (DataAsset version)
 	*/
-	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Limits")
+	UPROPERTY(Transient, VisibleAnywhere, AdvancedDisplay, Category = "Collision", meta = (DisplayName = "Planar Collision Data"))
 	TArray<FPlanarLimit> PlanarLimitsData;
 
 	/**
 	 * コリジョンを同じActor/ChildActorファミリー内のKawaiiPhysicsに共有する
 	 * Provide this node's collision limits to KawaiiPhysics nodes in the same attached actor family
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Shared Collision", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Shared Collision", meta = (PinHiddenByDefault))
 	bool bSharedCollisionSource = false;
 
 	/**
@@ -369,7 +475,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	 * Use shared collision limits from source KawaiiPhysics nodes in the same attached actor family.
 	 * To use same-frame data in one AnimGraph, place the source node so it evaluates before the target node.
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Shared Collision",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Shared Collision",
 		meta = (PinHiddenByDefault, EditCondition = "!bSharedCollisionSource"))
 	bool bUseSharedCollision = false;
 
@@ -377,7 +483,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	 * 共有コリジョンのグループタグ（同じActor/ChildActorファミリー内のSource/Target両方で使用）
 	 * Group tag for shared collision (used by both source and target in the same attached actor family)
 	 */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Shared Collision",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Shared Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bSharedCollisionSource || bUseSharedCollision"))
 	FGameplayTag SharedCollisionGroupTag;
 
@@ -391,28 +497,28 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* Stiffness type to use in Bone Constraint
 	* http://blog.mmacklin.com/2016/10/12/xpbd-slides-and-stiffness/
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	EXPBDComplianceType BoneConstraintGlobalComplianceType = EXPBDComplianceType::Leather;
 	/** 
 	* Bone Constraintの処理回数（コリジョン処理前）
 	* Number of Bone Constraints processed before collision processing
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	int32 BoneConstraintIterationCountBeforeCollision = 1;
 	/** 
 	* Bone Constraintの処理回数（コリジョン処理後）
 	* Number of Bone Constraints processed after collision processing
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	int32 BoneConstraintIterationCountAfterCollision = 1;
 	/** 
 	* 末端ボーンをBoneConstraint処理の対象にした場合、自動的にダミーボーンも処理対象にするフラグ
 	* Flag to automatically processes dummy bones when the end bones are subject to BoneConstraint processing.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	bool bAutoAddChildDummyBoneConstraint = true;
 
@@ -420,14 +526,14 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* BoneConstraint処理の対象となるボーンのペアを設定。スカートのように、ボーン間の距離を維持したい場合に使用
 	* Sets the bone pair to be processed by BoneConstraint. Used when you want to maintain the distance between bones, such as a skirt.
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits|Bone Constraint", meta=(TitleProperty="{Bone1} - {Bone2}"))
+	UPROPERTY(EditAnywhere, Category = "Collision|Bone Constraint", meta=(TitleProperty="{Bone1} - {Bone2}"))
 	TArray<FModifyBoneConstraint> BoneConstraints;
 
 	/** 
 	* BoneConstraint処理の対象となるボーンのペアを設定 (DataAsset版）。別AnimNode・ABPで設定を流用したい場合はこちらを推奨
 	* Set the bone pairs to be processed by BoneConstraint (DataAsset version). If you want to reuse the settings for another AnimNode or another ABP, this is recommended.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|Bone Constraint",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Bone Constraint",
 		meta = (PinHiddenByDefault))
 	TObjectPtr<UKawaiiPhysicsBoneConstraintsDataAsset> BoneConstraintsDataAsset;
 
@@ -435,7 +541,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* BoneConstraint処理の対象となるボーンのペアのプレビュー
 	* Preview of bone pairs that will be processed by BoneConstraint
 	*/
-	UPROPERTY(Transient, VisibleAnywhere, Category = "Limits|Bone Constraint", AdvancedDisplay,
+	UPROPERTY(Transient, VisibleAnywhere, Category = "Collision|Bone Constraint", AdvancedDisplay,
 		meta=(TitleProperty="{Bone1} - {Bone2}"))
 	TArray<FModifyBoneConstraint> BoneConstraintsData;
 	// ランタイムキャッシュ(BoneConstraints + BoneConstraintsData)。InitBoneConstraints で再構築されるため非シリアライズ。
@@ -522,6 +628,84 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 		meta = (BaseStruct = "/Script/KawaiiPhysics.KawaiiPhysics_ExternalForce", ExcludeBaseStruct))
 	TArray<FInstancedStruct> ExternalForces;
 
+	FKawaiiPhysicsTransientForceStore TransientForceStore;
+	static constexpr int32 MaxTransientExternalForces = 8;
+	static constexpr int32 MaxPhysicsSettingsOverrides = 8;
+	// InheritForceIndex 用センチネル: 有効な authored ProceduralWind すべてに 1 つずつ transient 突風を展開する（展開はノードの一時外力上限 MaxTransientExternalForces の範囲内）
+	// Sentinel for InheritForceIndex: spawn one transient gust per enabled authored ProceduralWind (expansion is bounded by MaxTransientExternalForces).
+	static constexpr int32 TransientGustInheritAllWinds = -2;
+
+	// 一時外力ハンドルIDを生成する。ID は同期データを運ばず payload はキュー Mutex 保護のため relaxed で十分。
+	static int64 GenerateTransientForceHandleId();
+
+	/**
+	 * 実行時専用の一時外力をリクエストする。任意スレッド可で、Mutex 保護されたキューへ積む。
+	 * BP再コンパイルやノード再初期化で失われる。Initialize(Context) は呼ばれないため汎用外力では制限あり
+	 * （ProceduralWind は PreApply で RuntimeState を遅延生成するため安全）。
+	 * ストアはGC追跡外。UObject参照を含む外力を渡す場合は呼び出し側が参照の生存を保証すること / The store is not GC-tracked; callers passing forces with UObject references must keep those objects alive.
+	 * Request a runtime-only transient external force. Callable from any thread; it is queued under a mutex.
+	 * Lost on BP recompile or node re-init. Initialize(Context) is not called, which limits generic use
+	 * (ProceduralWind is safe because it lazily creates RuntimeState in PreApply).
+	 */
+	int64 RequestTransientExternalForce(FInstancedStruct&& InForce, float InLifetimeSeconds, int64 InHandleId = 0);
+
+	/**
+	 * 実行時専用の一時突風をリクエストする。任意スレッド可で、Mutex 保護されたキューへパラメータだけを積む。
+	 * BP再コンパイルやノード再初期化で失われる。Initialize(Context) は呼ばれないため汎用外力では制限あり
+	 * （ProceduralWind は PreApply で RuntimeState を遅延生成するため安全）。
+	 * Request a runtime-only transient gust. Callable from any thread; only parameters are queued under a mutex.
+	 * Lost on BP recompile or node re-init. Initialize(Context) is not called, which limits generic use
+	 * (ProceduralWind is safe because it lazily creates RuntimeState in PreApply).
+	 */
+	int64 RequestTransientGust(float Strength, float RiseTime, float DecayTime,
+	                           const FVector& GustDirection, int32 InheritForceIndex = INDEX_NONE,
+	                           float HoldTime = 0.0f, int64 InHandleId = 0, bool bRealTimeEnvelope = false);
+
+	// 実行中またはキュー済みの一時外力をハンドル単位で停止する。任意スレッド可。
+	void RequestStopTransientExternalForce(int64 HandleId, float BlendOutTime);
+
+	/**
+	 * キュー済み一時外力を worker で取り込み、寿命切れを掃除する。worker 専用で 1 evaluate 1 回だけ呼ぶ。
+	 * BP再コンパイルやノード再初期化で失われる。Initialize(Context) は呼ばれないため汎用外力では制限あり
+	 * （ProceduralWind は PreApply で RuntimeState を遅延生成するため安全）。
+	 * Consume queued transient forces on the worker and sweep expired entries. Worker-only; call once per evaluate.
+	 * Lost on BP recompile or node re-init. Initialize(Context) is not called, which limits generic use
+	 * (ProceduralWind is safe because it lazily creates RuntimeState in PreApply).
+	 */
+	void ConsumeAndSweepTransientExternalForces(float InFrameDeltaTime);
+
+	/**
+	 * 物理設定への一時倍率オーバーライドをリクエストする。任意スレッド可で、Mutex 保護されたキューへ積む。
+	 * ベースの設定値は書き換えず、有効な間だけ各ボーンの実効値へ倍率を乗算するため、期間終了後は常に元の挙動へ戻る。
+	 * BP再コンパイルやノード再初期化で失われる。
+	 * Request a temporary multiplier override for the physics settings. Callable from any thread; it is queued under a mutex.
+	 * The base settings are never rewritten: the multipliers are applied to each bone's effective values only while the
+	 * override is alive, so the original behavior always comes back once it ends.
+	 * Lost on BP recompile or node re-init.
+	 */
+	int64 RequestPhysicsSettingsOverride(const FKawaiiPhysicsSettingsScale& InScale, float RiseTime, float HoldTime,
+	                                     float DecayTime, int64 InHandleId = 0);
+
+	// 実行中またはキュー済みの物理設定オーバーライドをハンドル単位で停止する。任意スレッド可。
+	void RequestStopPhysicsSettingsOverride(int64 HandleId, float BlendOutTime);
+
+	/**
+	 * キュー済みの物理設定オーバーライドを worker で取り込み、経過時間を進めて期限切れを掃除する。
+	 * worker 専用で 1 evaluate 1 回だけ、UpdatePhysicsSettingsOfModifyBones の前に呼ぶ。
+	 * Consume queued physics settings overrides on the worker, advance their elapsed time and sweep expired entries.
+	 * Worker-only; call once per evaluate, before UpdatePhysicsSettingsOfModifyBones.
+	 * @return アクティブなオーバーライドが1件以上あるか / whether at least one override is active
+	 */
+	bool ConsumeAndAdvancePhysicsSettingsOverrides(float InFrameDeltaTime);
+
+	// UpdatePhysicsSettingsOfModifyBones を走らせるべきかの判定（EvaluateSkeletalControl_AnyThread とテストハーネスで共有）
+	bool ShouldUpdatePhysicsSettings(const bool bHasActiveSettingsOverride) const
+	{
+		// bUpdatePhysicsSettingsInGame が無効でも、オーバーライドの有効中と終了直後の1回は更新してベース値へ戻す
+		return !bInitPhysicsSettings || bUpdatePhysicsSettingsInGame ||
+			bHasActiveSettingsOverride || bPhysicsSettingsOverrideAppliedLastUpdate;
+	}
+
 	/**
 	* EXPERIMENTAL: 外力のプリセット。BP・C++で独自のプリセットを追加可能(Instanced Property)
 	* 注意：AnimNodeをクリック or ABPをコンパイルしないと正常に動作しません
@@ -536,18 +720,19 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* レベル上の各コリジョンとの判定を行うフラグ。有効にすると物理処理の負荷が大幅に上がります
 	* Flag for collision detection with each collision on the level. Enabling this will significantly increase the load of physics processing.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|World Collision", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|World Collision", meta = (PinHiddenByDefault))
 	bool bAllowWorldCollision = false;
 
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|World Collision",
+	/** WorldCollisionで独自のコリジョン設定を使用するフラグ / Flag to use custom collision settings in WorldCollision */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|World Collision",
 		meta = (PinHiddenByDefault, InlineEditConditionToggle))
 	bool bOverrideCollisionParams = false;
 	/** 
 	* SkeletalMeshComponentが持つコリジョン設定ではなく、独自のコリジョン設定をWorldCollisionで使用する際に設定
 	* Use custom collision settings in WorldCollision instead of the collision settings set in SkeletalMeshComponent.
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits|World Collision",
+	UPROPERTY(EditAnywhere, Category = "Collision|World Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bOverrideCollisionParams", DisplayName=
 			"Override SkelComp Collision Params"))
 	FBodyInstance CollisionChannelSettings;
@@ -556,7 +741,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* WorldCollisionにて、SkeletalMeshComponentが持つコリジョン(PhysicsAsset)を無視するフラグ
 	* In WorldCollision, Flag to ignore collisions for SkeletalMeshComponent(PhysicsAsset) in WorldCollision
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Limits|World Collision",
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|World Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bAllowWorldCollision"))
 	bool bIgnoreSelfComponent = true;
 
@@ -564,14 +749,14 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* WorldCollisionにて、SkeletalMeshComponentが持つコリジョン(PhysicsAsset)を無視する設定（骨）
 	* In WorldCollision, set to ignore collision (PhysicsAsset) of SkeletalMeshComponent using bone
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits|World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
+	UPROPERTY(EditAnywhere, Category = "Collision|World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
 	TArray<FBoneReference> IgnoreBones;
 
 	/** 
 	* WorldCollisionにて、SkeletalMeshComponentが持つコリジョン(PhysicsAsset)を無視する設定（骨名のプリフィックス）
 	* In WorldCollision, set to ignore collision (PhysicsAsset) of SkeletalMeshComponent using bone name prefix
 	*/
-	UPROPERTY(EditAnywhere, Category = "Limits|World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
+	UPROPERTY(EditAnywhere, Category = "Collision|World Collision", meta = (EditCondition = "!bIgnoreSelfComponent"))
 	TArray<FName> IgnoreBoneNamePrefix;
 
 	/**
@@ -588,7 +773,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	UPROPERTY(Transient, BlueprintReadWrite, Category = "Bones")
 	TArray<FKawaiiPhysicsModifyBone> ModifyBones;
 
-	UPROPERTY(BlueprintReadOnly, Category = "KawaiiPhysics")
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics")
 	float DeltaTime = 0.0f;
 
 private:
@@ -643,6 +828,13 @@ private:
 	bool bInitPhysicsSettings = false;
 
 	/**
+	 * 前回の更新で倍率オーバーライドが適用されていたか。終了直後にもう1回だけ更新を走らせ、ベース値へ確実に戻すために使う
+	 * Whether a scale override was applied on the previous update. Used to run one more update right after it ends so the
+	 * base values are guaranteed to be restored.
+	 */
+	bool bPhysicsSettingsOverrideAppliedLastUpdate = false;
+
+	/**
 	 * Transform of the skeletal component in last frame.
 	 */
 	FTransform PreSkelCompTransform;
@@ -689,6 +881,8 @@ private:
 	FName CachedOwnerActorName;
 	// SimulationBaseBone無効警告をノードごと1回だけ出すためのガード / Guard to log the invalid SimulationBaseBone warning once per node
 	bool bSimBaseBoneInvalidWarned = false;
+	// MirrorDataTable用Skeleton欠落警告をノードごと1回だけ出すためのガード / Guard to log the missing Skeleton warning for MirrorDataTable once per node
+	bool bMirrorSkeletonMissingWarned = false;
 #endif
 
 	// --- Shared Collision ---
@@ -711,6 +905,7 @@ private:
 	// Shared collision working arrays (converted to simulation space)
 	TArray<FSphericalLimit> SharedSphericalLimits;
 	TArray<FCapsuleLimit> SharedCapsuleLimits;
+	TArray<FTaperedCapsuleLimit> SharedTaperedCapsuleLimits;
 	TArray<FBoxLimit> SharedBoxLimits;
 	TArray<FPlanarLimit> SharedPlanarLimits;
 
@@ -988,6 +1183,12 @@ protected:
 	void ApplyPhysicsAsset(const FBoneContainer& RequiredBones);
 
 	/**
+	 * MirrorDataTableForLimitsに基づき既存コリジョンをミラー先ボーンへ複製してLimitsDataへ追加。ApplyLimitsDataAsset / ApplyPhysicsAssetの後に呼ぶこと
+	 * Duplicates existing collisions onto mirrored bones and appends them to the merged LimitsData arrays. Must be called after ApplyLimitsDataAsset / ApplyPhysicsAsset.
+	 */
+	void ApplyMirrorLimits(const FBoneContainer& RequiredBones);
+
+	/**
 	 * Applies the bone constraint data asset to BoneConstraints.
 	 *
 	 * @param RequiredBones The bone container containing the required bones.
@@ -1037,6 +1238,13 @@ protected:
 	void UpdatePhysicsSettingsOfModifyBones();
 
 	/**
+	 * 実行中の全オーバーライドを合成した実効倍率を返す。成分ごとに Lerp(1.0, Scale, α) の積で、α はボーンに依存しない
+	 * Returns the effective multipliers of every active override combined: per component, the product of Lerp(1.0, Scale, α).
+	 * α does not depend on the bone.
+	 */
+	FKawaiiPhysicsSettingsScale ComputeEffectivePhysicsSettingsOverrideScale() const;
+
+	/**
 	 * Updates the spherical limits for the given bones.
 	 *
 	 * @param Limits An array of spherical limits to update.
@@ -1058,6 +1266,16 @@ protected:
 	void UpdateCapsuleLimits(TArray<FCapsuleLimit>& Limits, FComponentSpacePoseContext& Output,
 	                         const FBoneContainer& BoneContainer, const FTransform& ComponentTransform) const;
 
+	/**
+	 * Updates the tapered capsule limits for the given bones.
+	 *
+	 * @param Limits An array of tapered capsule limits to update.
+	 * @param Output The pose context.
+	 * @param BoneContainer The bone container.
+	 * @param ComponentTransform The component transform.
+	 */
+	void UpdateTaperedCapsuleLimits(TArray<FTaperedCapsuleLimit>& Limits, FComponentSpacePoseContext& Output,
+	                                const FBoneContainer& BoneContainer, const FTransform& ComponentTransform) const;
 
 	/**
 	 * Updates the box limits for the given bones.
@@ -1221,6 +1439,14 @@ protected:
 	void AdjustByCapsuleCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FCapsuleLimit>& Limits);
 
 	/**
+	 * Adjusts the bone position based on tapered capsule collision limits.
+	 *
+	 * @param Bone The bone to adjust.
+	 * @param Limits An array of tapered capsule limits.
+	 */
+	void AdjustByTaperedCapsuleCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FTaperedCapsuleLimit>& Limits);
+
+	/**
 	 * Adjusts the bone position based on box collision limits.
 	 *
 	 * @param Bone The bone to adjust.
@@ -1296,6 +1522,11 @@ protected:
 	void AnimDrawDebugBox(FComponentSpacePoseContext& Output, const FVector& CenterLocationSim,
 	                      const FQuat& RotationSim,
 	                      const FVector& Extent, const FColor& Color, float Thickness) const;
+
+	// Draw debug Tapered Capsule
+	void AnimDrawDebugTaperedCapsule(FComponentSpacePoseContext& Output, const FVector& CenterLocationSim,
+	                                 const FQuat& RotationSim, float Radius0, float Radius1, float Length,
+	                                 const FColor& Color, float Thickness) const;
 #endif
 
 

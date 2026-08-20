@@ -496,4 +496,84 @@ bool FKawaiiPhysicsNumericalStabilityTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+//  物理設定カーブ評価（全カーブ空の高速パスと per-bone 経路の等価性）
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKawaiiPhysicsPhysicsSettingsCurveTest,
+                                 "KawaiiPhysics.Simulation.PhysicsSettingsCurvePaths",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKawaiiPhysicsPhysicsSettingsCurveTest::RunTest(const FString& Parameters)
+{
+	constexpr int32 NumBones = 8;
+
+	FKawaiiPhysicsTestAccessor A;
+	A.BuildVerticalChain(NumBones, 10.0f);
+	for (int32 i = 0; i < NumBones; ++i)
+	{
+		// per-bone 経路のカーブ評価位置。ハーネスは設定しないためここで振る。
+		A.Bone(i).LengthRateFromRoot = static_cast<float>(i) / (NumBones - 1);
+	}
+
+	// UpdatePhysicsSettingsOfModifyBones はノードの PhysicsSettings を基準値に使う
+	A.Node.PhysicsSettings.Damping = 0.8f;
+	A.Node.PhysicsSettings.WorldDampingLocation = 0.6f;
+	A.Node.PhysicsSettings.WorldDampingRotation = 0.7f;
+	A.Node.PhysicsSettings.Stiffness = 0.9f;
+	A.Node.PhysicsSettings.Radius = 3.0f;
+	A.Node.PhysicsSettings.LimitAngle = 30.0f;
+
+	// --- 1. 高速パス（全カーブ空・DefaultValue なし）: 基準値がそのまま入る ---
+	A.CallUpdatePhysicsSettings();
+	for (int32 i = 0; i < NumBones; ++i)
+	{
+		const FKawaiiPhysicsSettings& S = A.Bone(i).PhysicsSettings;
+		TestTrue(FString::Printf(TEXT("FastPath base: bone %d"), i),
+		         S.Damping == 0.8f && S.WorldDampingLocation == 0.6f && S.WorldDampingRotation == 0.7f &&
+		         S.Stiffness == 0.9f && S.Radius == 3.0f && S.LimitAngle == 30.0f);
+	}
+
+	// --- 2. 高速パス（全カーブ空・DefaultValue あり）: DefaultValue の乗算とクランプが効く ---
+	A.Node.DampingCurveData.EditorCurveData.SetDefaultValue(2.0f);              // 0.8*2.0=1.6 → 上限クランプで 1.0
+	A.Node.WorldDampingLocationCurveData.EditorCurveData.SetDefaultValue(0.5f); // 0.6*0.5=0.3
+	A.Node.RadiusCurveData.EditorCurveData.SetDefaultValue(-1.0f);              // 3.0*-1.0 → Max で 0.0
+	A.CallUpdatePhysicsSettings();
+	TArray<FKawaiiPhysicsSettings> FastPathResults;
+	for (int32 i = 0; i < NumBones; ++i)
+	{
+		const FKawaiiPhysicsSettings& S = A.Bone(i).PhysicsSettings;
+		TestTrue(FString::Printf(TEXT("FastPath DefaultValue: bone %d damping=%f wdl=%f radius=%f"),
+		                         i, S.Damping, S.WorldDampingLocation, S.Radius),
+		         S.Damping == 1.0f && S.WorldDampingLocation == 0.3f && S.Radius == 0.0f);
+		FastPathResults.Add(S);
+	}
+
+	// --- 3. per-bone 経路との等価性: キー付きカーブを1本足して分岐を切り替え、
+	//        空カーブ（DefaultValue 含む）の評価結果が高速パスとビット一致することを確認 ---
+	A.Node.StiffnessCurveData.EditorCurveData.AddKey(0.0f, 1.0f);
+	A.Node.StiffnessCurveData.EditorCurveData.AddKey(1.0f, 0.5f);
+	A.CallUpdatePhysicsSettings();
+	for (int32 i = 0; i < NumBones; ++i)
+	{
+		const FKawaiiPhysicsSettings& S = A.Bone(i).PhysicsSettings;
+		const FKawaiiPhysicsSettings& F = FastPathResults[i];
+		TestTrue(FString::Printf(TEXT("PerBone path matches fast path for empty curves: bone %d"), i),
+		         S.Damping == F.Damping && S.WorldDampingLocation == F.WorldDampingLocation &&
+		         S.WorldDampingRotation == F.WorldDampingRotation && S.Radius == F.Radius &&
+		         S.LimitAngle == F.LimitAngle);
+
+		// キー付きカーブは LengthRateFromRoot 位置の評価値が乗る
+		const float ExpectedStiffness = FMath::Clamp(
+			0.9f * A.Node.StiffnessCurveData.EditorCurveData.Eval(A.Bone(i).LengthRateFromRoot, 1.0f), 0.0f, 1.0f);
+		TestTrue(FString::Printf(TEXT("PerBone stiffness curve: bone %d got=%f expected=%f"),
+		                         i, S.Stiffness, ExpectedStiffness),
+		         S.Stiffness == ExpectedStiffness);
+	}
+	// per-bone 経路で Stiffness が実際にボーン毎に変化していること（カーブが効いている証拠）
+	TestTrue(TEXT("PerBone stiffness varies along the chain"),
+	         A.Bone(0).PhysicsSettings.Stiffness != A.Bone(NumBones - 1).PhysicsSettings.Stiffness);
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

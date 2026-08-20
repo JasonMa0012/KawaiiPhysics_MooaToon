@@ -14,6 +14,7 @@
 #include "SceneManagement.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "PhysicsEngine/TaperedCapsuleElem.h"
 
 #if !UE_VERSION_OLDER_THAN(5, 6, 0)
 #include "SceneView.h"
@@ -65,6 +66,7 @@ void FKawaiiPhysicsEditMode::EnterMode(UAnimGraphNode_Base* InEditorNode, FAnimN
 	// for Sync DetailPanel
 	GraphNode->Node.SphericalLimitsData = RuntimeNode->SphericalLimitsData;
 	GraphNode->Node.CapsuleLimitsData = RuntimeNode->CapsuleLimitsData;
+	GraphNode->Node.TaperedCapsuleLimitsData = RuntimeNode->TaperedCapsuleLimitsData;
 	GraphNode->Node.BoxLimitsData = RuntimeNode->BoxLimitsData;
 	GraphNode->Node.PlanarLimitsData = RuntimeNode->PlanarLimitsData;
 	GraphNode->Node.BoneConstraintsData = RuntimeNode->BoneConstraintsData;
@@ -128,6 +130,7 @@ void FKawaiiPhysicsEditMode::Render(const FSceneView* View, FViewport* Viewport,
 		RenderSyncBone(PDI);
 		RenderSphericalLimits(PDI);
 		RenderCapsuleLimit(PDI);
+		RenderTaperedCapsuleLimit(PDI);
 		RenderBoxLimit(PDI);
 		RenderPlanerLimit(PDI);
 		RenderBoneConstraint(PDI);
@@ -363,13 +366,18 @@ void FKawaiiPhysicsEditMode::RenderSphericalLimits(FPrimitiveDrawInterface* PDI)
 			DrawSphereLimit(RuntimeNode->SphericalLimitsData[i], i,
 			                GEngine->ConstraintLimitMaterialZ->GetRenderProxy(), true);
 		}
-		else
+		else if (RuntimeNode->SphericalLimitsData[i].SourceType == ECollisionSourceType::PhysicsAsset)
 		{
 			if (PhysicsAssetBodyMaterial->IsValidLowLevel())
 			{
 				DrawSphereLimit(RuntimeNode->SphericalLimitsData[i], i, PhysicsAssetBodyMaterial->GetRenderProxy(),
 				                false);
 			}
+		}
+		else if (RuntimeNode->SphericalLimitsData[i].SourceType == ECollisionSourceType::Mirror)
+		{
+			DrawSphereLimit(RuntimeNode->SphericalLimitsData[i], i,
+			                GEngine->ConstraintLimitMaterialX->GetRenderProxy(), false);
 		}
 	}
 }
@@ -429,12 +437,83 @@ void FKawaiiPhysicsEditMode::RenderCapsuleLimit(FPrimitiveDrawInterface* PDI) co
 			DrawCapsule(RuntimeNode->CapsuleLimitsData[i], i,
 			            GEngine->ConstraintLimitMaterialZ->GetRenderProxy(), true);
 		}
-		else
+		else if (RuntimeNode->CapsuleLimitsData[i].SourceType == ECollisionSourceType::PhysicsAsset)
 		{
 			if (PhysicsAssetBodyMaterial->IsValidLowLevel())
 			{
 				DrawCapsule(RuntimeNode->CapsuleLimitsData[i], i, PhysicsAssetBodyMaterial->GetRenderProxy(), false);
 			}
+		}
+		else if (RuntimeNode->CapsuleLimitsData[i].SourceType == ECollisionSourceType::Mirror)
+		{
+			DrawCapsule(RuntimeNode->CapsuleLimitsData[i], i,
+			            GEngine->ConstraintLimitMaterialX->GetRenderProxy(), false);
+		}
+	}
+}
+
+void FKawaiiPhysicsEditMode::RenderTaperedCapsuleLimit(FPrimitiveDrawInterface* PDI) const
+{
+	if (!GraphNode->bEnableDebugDrawTaperedCapsuleLimit)
+	{
+		return;
+	}
+
+	auto DrawTaperedCapsule = [&](const auto& TaperedCapsule, int32 Index, const FMaterialRenderProxy* MaterialProxy,
+	                              bool bUseHit)
+	{
+		if (TaperedCapsule.bEnable && (TaperedCapsule.Radius0 > 0 || TaperedCapsule.Radius1 > 0))
+		{
+			FVector Location = TaperedCapsule.Location;
+			FQuat Rotation = TaperedCapsule.Rotation;
+			if (RuntimeNode->SimulationSpace == EKawaiiPhysicsSimulationSpace::BaseBoneSpace)
+			{
+				const FTransform& BaseBoneSpace2ComponentSpace = RuntimeNode->GetBaseBoneSpace2ComponentSpace();
+				Location = BaseBoneSpace2ComponentSpace.TransformPosition(Location);
+				Rotation = BaseBoneSpace2ComponentSpace.TransformRotation(Rotation);
+			}
+
+			PDI->SetHitProxy(bUseHit
+				                 ? new HKawaiiPhysicsHitProxy(ECollisionLimitType::TaperedCapsule, Index,
+				                                              TaperedCapsule.SourceType)
+				                 : nullptr);
+
+			const FKTaperedCapsuleElem TaperedCapsuleElem(
+				TaperedCapsule.Radius0, TaperedCapsule.Radius1, TaperedCapsule.Length);
+			const FTransform ElemTM(Rotation, Location);
+			TaperedCapsuleElem.DrawElemSolid(PDI, ElemTM, 1.0f, MaterialProxy);
+			TaperedCapsuleElem.DrawElemWire(PDI, ElemTM, 1.0f, FColor::Black);
+			DrawCoordinateSystem(PDI, Location, Rotation.Rotator(),
+			                     FMath::Max(TaperedCapsule.Radius0, TaperedCapsule.Radius1), SDPG_World + 1);
+			PDI->SetHitProxy(nullptr);
+		}
+	};
+
+	for (int32 i = 0; i < RuntimeNode->TaperedCapsuleLimits.Num(); i++)
+	{
+		DrawTaperedCapsule(RuntimeNode->TaperedCapsuleLimits[i], i,
+		                   GEngine->ConstraintLimitMaterialPrismatic->GetRenderProxy(), true);
+	}
+
+	for (int32 i = 0; i < RuntimeNode->TaperedCapsuleLimitsData.Num(); i++)
+	{
+		if (RuntimeNode->TaperedCapsuleLimitsData[i].SourceType == ECollisionSourceType::DataAsset)
+		{
+			DrawTaperedCapsule(RuntimeNode->TaperedCapsuleLimitsData[i], i,
+			                   GEngine->ConstraintLimitMaterialZ->GetRenderProxy(), true);
+		}
+		else if (RuntimeNode->TaperedCapsuleLimitsData[i].SourceType == ECollisionSourceType::PhysicsAsset)
+		{
+			if (PhysicsAssetBodyMaterial->IsValidLowLevel())
+			{
+				DrawTaperedCapsule(RuntimeNode->TaperedCapsuleLimitsData[i], i,
+				                   PhysicsAssetBodyMaterial->GetRenderProxy(), false);
+			}
+		}
+		else if (RuntimeNode->TaperedCapsuleLimitsData[i].SourceType == ECollisionSourceType::Mirror)
+		{
+			DrawTaperedCapsule(RuntimeNode->TaperedCapsuleLimitsData[i], i,
+			                   GEngine->ConstraintLimitMaterialX->GetRenderProxy(), false);
 		}
 	}
 }
@@ -484,12 +563,17 @@ void FKawaiiPhysicsEditMode::RenderBoxLimit(FPrimitiveDrawInterface* PDI) const
 			DrawBoxLimit(RuntimeNode->BoxLimitsData[i], i,
 			             GEngine->ConstraintLimitMaterialZ->GetRenderProxy());
 		}
-		else
+		else if (RuntimeNode->BoxLimitsData[i].SourceType == ECollisionSourceType::PhysicsAsset)
 		{
 			if (PhysicsAssetBodyMaterial->IsValidLowLevel())
 			{
 				DrawBoxLimit(RuntimeNode->BoxLimitsData[i], i, PhysicsAssetBodyMaterial->GetRenderProxy(), false);
 			}
+		}
+		else if (RuntimeNode->BoxLimitsData[i].SourceType == ECollisionSourceType::Mirror)
+		{
+			DrawBoxLimit(RuntimeNode->BoxLimitsData[i], i,
+			             GEngine->ConstraintLimitMaterialX->GetRenderProxy(), false);
 		}
 	}
 }
@@ -528,7 +612,24 @@ void FKawaiiPhysicsEditMode::RenderPlanerLimit(FPrimitiveDrawInterface* PDI)
 
 		for (int32 i = 0; i < RuntimeNode->PlanarLimitsData.Num(); i++)
 		{
-			DrawPlanarLimit(RuntimeNode->PlanarLimitsData[i], i, GEngine->ConstraintLimitMaterialZ->GetRenderProxy());
+			if (RuntimeNode->PlanarLimitsData[i].SourceType == ECollisionSourceType::DataAsset)
+			{
+				DrawPlanarLimit(RuntimeNode->PlanarLimitsData[i], i,
+				                GEngine->ConstraintLimitMaterialZ->GetRenderProxy());
+			}
+			else if (RuntimeNode->PlanarLimitsData[i].SourceType == ECollisionSourceType::PhysicsAsset)
+			{
+				if (PhysicsAssetBodyMaterial->IsValidLowLevel())
+				{
+					DrawPlanarLimit(RuntimeNode->PlanarLimitsData[i], i,
+					                PhysicsAssetBodyMaterial->GetRenderProxy(), false);
+				}
+			}
+			else if (RuntimeNode->PlanarLimitsData[i].SourceType == ECollisionSourceType::Mirror)
+			{
+				DrawPlanarLimit(RuntimeNode->PlanarLimitsData[i], i,
+				                GEngine->ConstraintLimitMaterialX->GetRenderProxy(), false);
+			}
 		}
 	}
 }
@@ -714,8 +815,9 @@ bool FKawaiiPhysicsEditMode::InputKey(FEditorViewportClient* InViewportClient, F
 			const auto CoordSystem = GetModeManager()->GetCoordSystem();
 			GetModeManager()->SetCoordSystem(CoordSystem == COORD_Local ? COORD_World : COORD_Local);
 		}
-		else if (InKey == EKeys::Delete && SelectCollisionSourceType != ECollisionSourceType::PhysicsAsset &&
-			IsValidSelectCollision())
+		else if (InKey == EKeys::Delete &&
+			(SelectCollisionSourceType == ECollisionSourceType::AnimNode ||
+				SelectCollisionSourceType == ECollisionSourceType::DataAsset) && IsValidSelectCollision())
 		{
 			const bool bFromDataAsset = (SelectCollisionSourceType == ECollisionSourceType::DataAsset);
 			UKawaiiPhysicsLimitsDataAsset* LimitsDataAsset = RuntimeNode->LimitsDataAsset;
@@ -820,6 +922,19 @@ bool FKawaiiPhysicsEditMode::InputKey(FEditorViewportClient* InViewportClient, F
 						RemoveAnimNodeLimit(RuntimeNode->CapsuleLimits, GraphNode->Node.CapsuleLimits);
 					}
 					break;
+				case ECollisionLimitType::TaperedCapsule:
+					if (bFromDataAsset)
+					{
+						RemoveDataAssetLimit(RuntimeNode->TaperedCapsuleLimitsData,
+						                     LimitsDataAsset->TaperedCapsuleLimits,
+						                     GraphNode->Node.TaperedCapsuleLimitsData);
+					}
+					else
+					{
+						RemoveAnimNodeLimit(RuntimeNode->TaperedCapsuleLimits,
+						                    GraphNode->Node.TaperedCapsuleLimits);
+					}
+					break;
 				case ECollisionLimitType::Box:
 					if (bFromDataAsset)
 					{
@@ -897,6 +1012,7 @@ void FKawaiiPhysicsEditMode::OnLimitDataAssetPropertyChange(FPropertyChangedEven
 {
 	GraphNode->Node.SphericalLimitsData = RuntimeNode->SphericalLimitsData;
 	GraphNode->Node.CapsuleLimitsData = RuntimeNode->CapsuleLimitsData;
+	GraphNode->Node.TaperedCapsuleLimitsData = RuntimeNode->TaperedCapsuleLimitsData;
 	GraphNode->Node.BoxLimitsData = RuntimeNode->BoxLimitsData;
 	GraphNode->Node.PlanarLimitsData = RuntimeNode->PlanarLimitsData;
 }
@@ -924,6 +1040,10 @@ bool FKawaiiPhysicsEditMode::IsValidSelectCollision() const
 		return !IsSelectAnimNodeCollision()
 			       ? RuntimeNode->CapsuleLimitsData.IsValidIndex(SelectCollisionIndex)
 			       : RuntimeNode->CapsuleLimits.IsValidIndex(SelectCollisionIndex);
+	case ECollisionLimitType::TaperedCapsule:
+		return !IsSelectAnimNodeCollision()
+			       ? RuntimeNode->TaperedCapsuleLimitsData.IsValidIndex(SelectCollisionIndex)
+			       : RuntimeNode->TaperedCapsuleLimits.IsValidIndex(SelectCollisionIndex);
 	case ECollisionLimitType::Box:
 		return !IsSelectAnimNodeCollision()
 			       ? RuntimeNode->BoxLimitsData.IsValidIndex(SelectCollisionIndex)
@@ -955,6 +1075,10 @@ FCollisionLimitBase* FKawaiiPhysicsEditMode::GetSelectCollisionLimitRuntime() co
 		return !IsSelectAnimNodeCollision()
 			       ? &(RuntimeNode->CapsuleLimitsData[SelectCollisionIndex])
 			       : &(RuntimeNode->CapsuleLimits[SelectCollisionIndex]);
+	case ECollisionLimitType::TaperedCapsule:
+		return !IsSelectAnimNodeCollision()
+			       ? &(RuntimeNode->TaperedCapsuleLimitsData[SelectCollisionIndex])
+			       : &(RuntimeNode->TaperedCapsuleLimits[SelectCollisionIndex]);
 	case ECollisionLimitType::Box:
 		return !IsSelectAnimNodeCollision()
 			       ? &(RuntimeNode->BoxLimitsData[SelectCollisionIndex])
@@ -997,6 +1121,15 @@ FCollisionLimitBase* FKawaiiPhysicsEditMode::GetSelectCollisionLimitGraph() cons
 				       ? &CollisionLimits[SelectCollisionIndex]
 				       : nullptr;
 		}
+	case ECollisionLimitType::TaperedCapsule:
+		{
+			auto& CollisionLimits = !IsSelectAnimNodeCollision()
+				                        ? GraphNode->Node.TaperedCapsuleLimitsData
+				                        : GraphNode->Node.TaperedCapsuleLimits;
+			return CollisionLimits.IsValidIndex(SelectCollisionIndex)
+				       ? &CollisionLimits[SelectCollisionIndex]
+				       : nullptr;
+		}
 	case ECollisionLimitType::Box:
 		{
 			auto& CollisionLimits = !IsSelectAnimNodeCollision()
@@ -1026,6 +1159,11 @@ void FKawaiiPhysicsEditMode::DoTranslation(FVector& InTranslation)
 {
 	if (InTranslation.IsNearlyZero())
 	{
+		return;
+	}
+	if (SelectCollisionSourceType == ECollisionSourceType::Mirror)
+	{
+		// Mirror由来は自動生成のため編集しない
 		return;
 	}
 
@@ -1069,6 +1207,11 @@ void FKawaiiPhysicsEditMode::DoRotation(FRotator& InRotation)
 	{
 		return;
 	}
+	if (SelectCollisionSourceType == ECollisionSourceType::Mirror)
+	{
+		// Mirror由来は自動生成のため編集しない
+		return;
+	}
 
 	FCollisionLimitBase* CollisionRuntime = GetSelectCollisionLimitRuntime();
 	FCollisionLimitBase* CollisionGraph = GetSelectCollisionLimitGraph();
@@ -1107,6 +1250,11 @@ void FKawaiiPhysicsEditMode::DoRotation(FRotator& InRotation)
 
 void FKawaiiPhysicsEditMode::DoScale(FVector& InScale)
 {
+	if (SelectCollisionSourceType == ECollisionSourceType::Mirror)
+	{
+		// Mirror由来は自動生成のため編集しない
+		return;
+	}
 	if (!IsValidSelectCollision() || InScale.IsNearlyZero() || SelectCollisionType == ECollisionLimitType::Planar)
 	{
 		return;
@@ -1159,6 +1307,29 @@ void FKawaiiPhysicsEditMode::DoScale(FVector& InScale)
 		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
 		{
 			RuntimeNode->LimitsDataAsset->UpdateLimit(&CapsuleLimitRuntime);
+		}
+	}
+	else if (SelectCollisionType == ECollisionLimitType::TaperedCapsule)
+	{
+		FTaperedCapsuleLimit& TaperedCapsuleLimitRuntime = *static_cast<FTaperedCapsuleLimit*>(CollisionRuntime);
+		FTaperedCapsuleLimit& TaperedCapsuleLimitGraph = *static_cast<FTaperedCapsuleLimit*>(CollisionGraph);
+
+		TaperedCapsuleLimitRuntime.Radius0 += InScale.X;
+		TaperedCapsuleLimitRuntime.Radius0 = FMath::Max(TaperedCapsuleLimitRuntime.Radius0, 0.0f);
+
+		TaperedCapsuleLimitRuntime.Radius1 += InScale.Y;
+		TaperedCapsuleLimitRuntime.Radius1 = FMath::Max(TaperedCapsuleLimitRuntime.Radius1, 0.0f);
+
+		TaperedCapsuleLimitRuntime.Length += InScale.Z;
+		TaperedCapsuleLimitRuntime.Length = FMath::Max(TaperedCapsuleLimitRuntime.Length, 0.0f);
+
+		TaperedCapsuleLimitGraph.Radius0 = TaperedCapsuleLimitRuntime.Radius0;
+		TaperedCapsuleLimitGraph.Radius1 = TaperedCapsuleLimitRuntime.Radius1;
+		TaperedCapsuleLimitGraph.Length = TaperedCapsuleLimitRuntime.Length;
+
+		if (SelectCollisionSourceType == ECollisionSourceType::DataAsset && RuntimeNode->LimitsDataAsset)
+		{
+			RuntimeNode->LimitsDataAsset->UpdateLimit(&TaperedCapsuleLimitRuntime);
 		}
 	}
 	else if (SelectCollisionType == ECollisionLimitType::Box)
@@ -1232,6 +1403,9 @@ void FKawaiiPhysicsEditMode::DrawHUD(FEditorViewportClient* ViewportClient, FVie
 		break;
 	case ECollisionLimitType::Capsule:
 		CollisionDebugInfo.Append(FString(TEXT("Capsule")));
+		break;
+	case ECollisionLimitType::TaperedCapsule:
+		CollisionDebugInfo.Append(FString(TEXT("TaperedCapsule")));
 		break;
 	case ECollisionLimitType::Box:
 		CollisionDebugInfo.Append(FString(TEXT("Box")));

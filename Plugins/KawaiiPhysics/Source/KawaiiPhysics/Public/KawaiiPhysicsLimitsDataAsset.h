@@ -139,8 +139,8 @@ struct FPlanarLimitData : public FCollisionLimitDataBase
 };
 
 /**
- * コリジョン Limit（球/カプセル/ボックス/平面）をまとめて定義し、複数の KawaiiPhysics ノードで流用するための DataAsset。
- * DataAsset that defines collision limits (sphere/capsule/box/planar) for reuse across multiple KawaiiPhysics nodes.
+ * コリジョン Limit（球/カプセル/テーパードカプセル/ボックス/平面）をまとめて定義し、複数の KawaiiPhysics ノードで流用するための DataAsset。
+ * DataAsset that defines collision limits (sphere/capsule/tapered capsule/box/planar) for reuse across multiple KawaiiPhysics nodes.
  */
 UCLASS(Blueprintable)
 class KAWAIIPHYSICS_API UKawaiiPhysicsLimitsDataAsset : public UDataAsset, public IBoneReferenceSkeletonProvider
@@ -150,6 +150,7 @@ class KAWAIIPHYSICS_API UKawaiiPhysicsLimitsDataAsset : public UDataAsset, publi
 
 public:
 #if WITH_EDITORONLY_DATA
+	/** ボーン参照の解決とプレビューに使用するSkeleton / Skeleton used to resolve bone references and preview */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Skeleton")
 	TObjectPtr<USkeleton> Skeleton;
 
@@ -165,12 +166,19 @@ public:
 
 #endif
 
+	/** コリジョン（球） / Spherical collision limits */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spherical Limits")
 	TArray<FSphericalLimit> SphericalLimits;
+	/** コリジョン（カプセル） / Capsule collision limits */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Capsule Limits")
 	TArray<FCapsuleLimit> CapsuleLimits;
+	/** コリジョン（テーパードカプセル） / Tapered capsule collision limits */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tapered Capsule Limits")
+	TArray<FTaperedCapsuleLimit> TaperedCapsuleLimits;
+	/** コリジョン（ボックス） / Box collision limits */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box Limits")
 	TArray<FBoxLimit> BoxLimits;
+	/** コリジョン（平面） / Planar collision limits */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planar Limits")
 	TArray<FPlanarLimit> PlanarLimits;
 

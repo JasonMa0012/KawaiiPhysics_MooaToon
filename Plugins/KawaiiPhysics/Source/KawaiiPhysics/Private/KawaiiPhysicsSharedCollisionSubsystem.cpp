@@ -73,6 +73,7 @@ void FKawaiiPhysicsSharedCollisionSourceSlot::AppendTo(FKawaiiPhysicsSharedColli
 	FReadScopeLock ReadLock(BufferLock);
 	OutData.SphericalLimits.Append(Buffer.SphericalLimits);
 	OutData.CapsuleLimits.Append(Buffer.CapsuleLimits);
+	OutData.TaperedCapsuleLimits.Append(Buffer.TaperedCapsuleLimits);
 	OutData.BoxLimits.Append(Buffer.BoxLimits);
 	OutData.PlanarLimits.Append(Buffer.PlanarLimits);
 }

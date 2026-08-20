@@ -205,7 +205,7 @@ struct FKawaiiPhysicsTestAccessor
 
 	/**
 	 * 1フレーム分を進める（SimulateModifyBones の純粋部分を複製）。
-	 * SkelComp 移動量のサブステップ分配は SkelCompMoveVector==0 前提のため省略。
+	 * SkelComp 移動量のサブステップ分配は本番と同じ割合で各固定ステップへ割り当てる。
 	 */
 	void StepFrame(float FrameDt)
 	{
@@ -221,13 +221,6 @@ struct FKawaiiPhysicsTestAccessor
 		{
 			return;
 		}
-		if (!ensureMsgf(Node.SkelCompMoveVector.IsNearlyZero() || !Node.bUseFixedSubsteppingCached,
-		                TEXT("FKawaiiPhysicsTestAccessor: nonzero SkelCompMoveVector is not distributed across substeps "
-			                "(production does at SimulateModifyBones). Use legacy mode or zero SkelCompMove.")))
-		{
-			return;
-		}
-
 		Node.DeltaTime = FrameDt;
 		Node.FrameDeltaTime = FrameDt;
 		PrepareFrame();
@@ -249,10 +242,13 @@ struct FKawaiiPhysicsTestAccessor
 		{
 			// ===== 固定タイムステップ・サブステップ（フレームレート非依存化） =====
 			const float FixedDt = 1.0f / Node.GetEffectiveTargetFramerate();
-			Node.SubstepAccumulator += Node.FrameDeltaTime;
-			Node.SubstepAccumulator = FMath::Min(Node.SubstepAccumulator, Node.MaxSubstepsCached * FixedDt);
+			const float RawElapsed = FMath::Max(Node.SubstepAccumulator + Node.FrameDeltaTime, KINDA_SMALL_NUMBER);
+			Node.SubstepAccumulator = FMath::Min(RawElapsed, Node.MaxSubstepsCached * FixedDt);
 			const int32 NumSteps = FMath::FloorToInt(Node.SubstepAccumulator / FixedDt);
 			Node.SubstepAccumulator -= NumSteps * FixedDt;
+			const float MoveFrac = FixedDt / RawElapsed;
+			const FVector FullSkelCompMove = Node.SkelCompMoveVector;
+			const FQuat FullSkelCompRot = Node.SkelCompMoveRotation;
 
 			Node.bInSubstep = true;
 			Node.StepDeltaTime = FixedDt;
@@ -266,9 +262,13 @@ struct FKawaiiPhysicsTestAccessor
 					Bone.PoseRotation =
 						FQuat::Slerp(Bone.PrevPoseRotation, Bone.CurrentPoseRotation, SubstepAlpha).GetNormalized();
 				}
+				Node.SkelCompMoveVector = FullSkelCompMove * MoveFrac;
+				Node.SkelCompMoveRotation = FQuat::Slerp(FQuat::Identity, FullSkelCompRot, MoveFrac).GetNormalized();
 				StepOnce();
 			}
 			Node.bInSubstep = false;
+			Node.SkelCompMoveVector = FullSkelCompMove;
+			Node.SkelCompMoveRotation = FullSkelCompRot;
 
 			for (FKawaiiPhysicsModifyBone& Bone : Node.ModifyBones)
 			{
@@ -304,6 +304,10 @@ struct FKawaiiPhysicsTestAccessor
 	void CallCapsuleCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FCapsuleLimit>& Limits)
 	{
 		Node.AdjustByCapsuleCollision(Bone, Limits);
+	}
+	void CallTaperedCapsuleCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FTaperedCapsuleLimit>& Limits)
+	{
+		Node.AdjustByTaperedCapsuleCollision(Bone, Limits);
 	}
 	void CallBoxCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FBoxLimit>& Limits)
 	{
@@ -342,6 +346,37 @@ struct FKawaiiPhysicsTestAccessor
 	void CallBoneConstraints()
 	{
 		Node.AdjustByBoneConstraints();
+	}
+	void CallUpdatePhysicsSettings()
+	{
+		Node.UpdatePhysicsSettingsOfModifyBones();
+	}
+
+	FKawaiiPhysicsSettingsScale CallComputeEffectiveSettingsOverrideScale() const
+	{
+		return Node.ComputeEffectivePhysicsSettingsOverrideScale();
+	}
+
+	void SetInitPhysicsSettings(bool bInit) { Node.bInitPhysicsSettings = bInit; }
+	bool IsPhysicsSettingsOverrideAppliedLastUpdate() const { return Node.bPhysicsSettingsOverrideAppliedLastUpdate; }
+
+	/**
+	 * EvaluateSkeletalControl_AnyThread の物理設定更新 gating（判定は ShouldUpdatePhysicsSettings を共有）を Output 無しで実行する
+	 * （bEditing は WITH_EDITORONLY_DATA 既定の false 相当として扱う）。
+	 * @return このフレームで UpdatePhysicsSettingsOfModifyBones が走ったか
+	 */
+	bool RunPhysicsSettingsUpdateGate(float FrameDt)
+	{
+		const bool bHasActiveSettingsOverride = Node.ConsumeAndAdvancePhysicsSettingsOverrides(FrameDt);
+		if (Node.ShouldUpdatePhysicsSettings(bHasActiveSettingsOverride))
+		{
+			Node.UpdatePhysicsSettingsOfModifyBones();
+			Node.bPhysicsSettingsOverrideAppliedLastUpdate = bHasActiveSettingsOverride;
+			Node.bInitPhysicsSettings = true;
+			return true;
+		}
+
+		return false;
 	}
 
 	FKawaiiPhysicsSyncTargetRoot CollectSyncChildTargetsForRoot(int32 RootIndex)
@@ -509,9 +544,15 @@ private:
 				continue;
 			}
 			Node.AdjustBySphereCollision(Bone, Node.SphericalLimits);
+			Node.AdjustBySphereCollision(Bone, Node.SphericalLimitsData);
 			Node.AdjustByCapsuleCollision(Bone, Node.CapsuleLimits);
+			Node.AdjustByCapsuleCollision(Bone, Node.CapsuleLimitsData);
+			Node.AdjustByTaperedCapsuleCollision(Bone, Node.TaperedCapsuleLimits);
+			Node.AdjustByTaperedCapsuleCollision(Bone, Node.TaperedCapsuleLimitsData);
 			Node.AdjustByBoxCollision(Bone, Node.BoxLimits);
+			Node.AdjustByBoxCollision(Bone, Node.BoxLimitsData);
 			Node.AdjustByPlanerCollision(Bone, Node.PlanarLimits);
+			Node.AdjustByPlanerCollision(Bone, Node.PlanarLimitsData);
 		}
 
 		// BoneConstraint after collision（SimulateOnce 516-522）

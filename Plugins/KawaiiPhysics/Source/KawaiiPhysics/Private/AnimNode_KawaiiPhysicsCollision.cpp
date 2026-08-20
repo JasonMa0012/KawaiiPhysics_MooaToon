@@ -2,7 +2,9 @@
 
 #include "AnimNode_KawaiiPhysics.h"
 
+#include "Animation/MirrorDataTable.h"
 #include "AnimationRuntime.h"
+#include "KawaiiPhysicsMirrorUtils.h"
 #include "KawaiiPhysicsBoneConstraintsDataAsset.h"
 #include "KawaiiPhysicsCustomExternalForce.h"
 #include "ExternalForces/KawaiiPhysicsExternalForce.h"
@@ -13,8 +15,10 @@
 #include "Runtime/Launch/Resources/Version.h"
 #include "SceneInterface.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/TaperedCapsuleElem.h"
 #include "Engine/World.h"
 #include "PhysicsEngine/PhysicsSettings.h"
+#include "Templates/RemoveReference.h"
 
 #if !UE_VERSION_OLDER_THAN(5, 5, 0)
 #include "PhysicsEngine/SkeletalBodySetup.h"
@@ -31,6 +35,7 @@
 
 #include "KawaiiPhysics.h"
 #include "AnimNode_KawaiiPhysicsInternal.h"
+#include "KawaiiPhysicsNodeWarning.h"
 
 void FAnimNode_KawaiiPhysics::ApplyLimitsDataAsset(const FBoneContainer& RequiredBones)
 {
@@ -51,6 +56,7 @@ void FAnimNode_KawaiiPhysics::ApplyLimitsDataAsset(const FBoneContainer& Require
 
 	RemoveAllSourceDataAssets(SphericalLimitsData);
 	RemoveAllSourceDataAssets(CapsuleLimitsData);
+	RemoveAllSourceDataAssets(TaperedCapsuleLimitsData);
 	RemoveAllSourceDataAssets(BoxLimitsData);
 	RemoveAllSourceDataAssets(PlanarLimitsData);
 
@@ -58,11 +64,13 @@ void FAnimNode_KawaiiPhysics::ApplyLimitsDataAsset(const FBoneContainer& Require
 	{
 		SphericalLimitsData.Append(LimitsDataAsset->SphericalLimits);
 		CapsuleLimitsData.Append(LimitsDataAsset->CapsuleLimits);
+		TaperedCapsuleLimitsData.Append(LimitsDataAsset->TaperedCapsuleLimits);
 		BoxLimitsData.Append(LimitsDataAsset->BoxLimits);
 		PlanarLimitsData.Append(LimitsDataAsset->PlanarLimits);
 
 		Initialize(SphericalLimitsData);
 		Initialize(CapsuleLimitsData);
+		Initialize(TaperedCapsuleLimitsData);
 		Initialize(BoxLimitsData);
 		Initialize(PlanarLimitsData);
 	}
@@ -87,6 +95,7 @@ void FAnimNode_KawaiiPhysics::ApplyPhysicsAsset(const FBoneContainer& RequiredBo
 
 	RemoveAllSourcePhysicsAssets(SphericalLimitsData);
 	RemoveAllSourcePhysicsAssets(CapsuleLimitsData);
+	RemoveAllSourcePhysicsAssets(TaperedCapsuleLimitsData);
 	RemoveAllSourcePhysicsAssets(BoxLimitsData);
 
 	if (PhysicsAssetForLimits)
@@ -121,6 +130,19 @@ void FAnimNode_KawaiiPhysics::ApplyPhysicsAsset(const FBoneContainer& RequiredBo
 				NewLimit.SourceType = ECollisionSourceType::PhysicsAsset;
 				CapsuleLimitsData.Add(NewLimit);
 			}
+			for (const auto& TaperedCapsuleElem : AggGeom.TaperedCapsuleElems)
+			{
+				FTaperedCapsuleLimit NewLimit;
+				NewLimit.DrivingBone = DrivingBone;
+				NewLimit.OffsetLocation = TaperedCapsuleElem.Center;
+				NewLimit.OffsetRotation = TaperedCapsuleElem.Rotation;
+				NewLimit.Radius0 = TaperedCapsuleElem.Radius0;
+				NewLimit.Radius1 = TaperedCapsuleElem.Radius1;
+				NewLimit.Length = TaperedCapsuleElem.Length;
+				NewLimit.SourceType = ECollisionSourceType::PhysicsAsset;
+				// Cloth用のWidth/bOneSidedCollisionは基本形状では扱わない
+				TaperedCapsuleLimitsData.Add(NewLimit);
+			}
 			for (const auto& BoxElem : AggGeom.BoxElems)
 			{
 				FBoxLimit NewLimit;
@@ -135,8 +157,110 @@ void FAnimNode_KawaiiPhysics::ApplyPhysicsAsset(const FBoneContainer& RequiredBo
 
 		Initialize(SphericalLimitsData);
 		Initialize(CapsuleLimitsData);
+		Initialize(TaperedCapsuleLimitsData);
 		Initialize(BoxLimitsData);
 	}
+}
+
+void FAnimNode_KawaiiPhysics::ApplyMirrorLimits(const FBoneContainer& RequiredBones)
+{
+	auto RemoveAllSourceMirrors = [](auto& Targets)
+	{
+		Targets.RemoveAll([](const FCollisionLimitBase& Limit)
+		{
+			return Limit.SourceType == ECollisionSourceType::Mirror;
+		});
+	};
+
+	RemoveAllSourceMirrors(SphericalLimitsData);
+	RemoveAllSourceMirrors(CapsuleLimitsData);
+	RemoveAllSourceMirrors(TaperedCapsuleLimitsData);
+	RemoveAllSourceMirrors(BoxLimitsData);
+	RemoveAllSourceMirrors(PlanarLimitsData);
+
+	if (!MirrorDataTableForLimits)
+	{
+		return;
+	}
+
+	const EAxis::Type MirrorAxis = MirrorDataTableForLimits->MirrorAxis;
+	if (MirrorAxis == EAxis::None)
+	{
+		return;
+	}
+
+	const USkeleton* Skeleton = RequiredBones.GetSkeletonAsset();
+	if (!Skeleton)
+	{
+		KAWAII_LOG_NODE_WARNING_ONCE(bMirrorSkeletonMissingWarned, LogKawaiiPhysics,
+			TEXT("MirrorDataTableForLimits is set, but RequiredBones has no Skeleton. Skip collision mirroring.%s"),
+			TEXT(""));
+		return;
+	}
+
+	TCustomBoneIndexArray<FSkeletonPoseBoneIndex, FSkeletonPoseBoneIndex> MirrorBoneIndexes;
+	MirrorDataTableForLimits->FillMirrorBoneIndexes(Skeleton, MirrorBoneIndexes);
+
+	const FReferenceSkeleton& SkeletonRefSkeleton = Skeleton->GetReferenceSkeleton();
+	const auto ResolveMirrorBoneName = [&SkeletonRefSkeleton, &MirrorBoneIndexes](FName BoneName) -> FName
+	{
+		if (BoneName.IsNone())
+		{
+			return NAME_None;
+		}
+
+		const int32 SkeletonBoneIndex = SkeletonRefSkeleton.FindBoneIndex(BoneName);
+		if (SkeletonBoneIndex == INDEX_NONE || !MirrorBoneIndexes.IsValidIndex(SkeletonBoneIndex))
+		{
+			return NAME_None;
+		}
+
+		const FSkeletonPoseBoneIndex MirroredBoneIndex = MirrorBoneIndexes[FSkeletonPoseBoneIndex(SkeletonBoneIndex)];
+		if (!MirroredBoneIndex.IsValid() || MirroredBoneIndex.GetInt() == SkeletonBoneIndex
+			|| !SkeletonRefSkeleton.IsValidIndex(MirroredBoneIndex.GetInt()))
+		{
+			return NAME_None;
+		}
+
+		return SkeletonRefSkeleton.GetBoneName(MirroredBoneIndex.GetInt());
+	};
+
+	const FReferenceSkeleton& MeshRefSkeleton = RequiredBones.GetReferenceSkeleton();
+	TArray<FQuat> CSRefRotations;
+	KawaiiPhysicsMirror::BuildComponentSpaceRefRotations(MeshRefSkeleton, CSRefRotations);
+
+	const auto FindBoneIndex = [&MeshRefSkeleton](FName BoneName) -> int32
+	{
+		return MeshRefSkeleton.FindBoneIndex(BoneName);
+	};
+
+	auto AppendMirrored = [&RequiredBones, &ResolveMirrorBoneName, &FindBoneIndex, &CSRefRotations, MirrorAxis,
+	                       this](const auto& NodeLimits, auto& MergedLimits)
+	{
+		using TLimit = typename TRemoveReference<decltype(MergedLimits)>::Type::ElementType;
+
+		TArray<TLimit> NewLimits;
+		KawaiiPhysicsMirror::AppendMirroredLimits(NodeLimits, NodeLimits, MergedLimits,
+		                                          bSkipMirroredBoneWithExistingCollision,
+		                                          ResolveMirrorBoneName, FindBoneIndex,
+		                                          CSRefRotations, MirrorAxis, NewLimits);
+		KawaiiPhysicsMirror::AppendMirroredLimits(MergedLimits, NodeLimits, MergedLimits,
+		                                          bSkipMirroredBoneWithExistingCollision,
+		                                          ResolveMirrorBoneName, FindBoneIndex,
+		                                          CSRefRotations, MirrorAxis, NewLimits);
+
+		for (auto& NewLimit : NewLimits)
+		{
+			NewLimit.DrivingBone.Initialize(RequiredBones);
+		}
+		MergedLimits.Append(MoveTemp(NewLimits));
+	};
+
+	AppendMirrored(SphericalLimits, SphericalLimitsData);
+	AppendMirrored(CapsuleLimits, CapsuleLimitsData);
+	AppendMirrored(TaperedCapsuleLimits, TaperedCapsuleLimitsData);
+	AppendMirrored(BoxLimits, BoxLimitsData);
+	AppendMirrored(PlanarLimits, PlanarLimitsData);
 }
 
 void FAnimNode_KawaiiPhysics::ApplyBoneConstraintDataAsset(const FBoneContainer& RequiredBones)
@@ -220,6 +344,43 @@ void FAnimNode_KawaiiPhysics::UpdateCapsuleLimits(TArray<FCapsuleLimit>& Limits,
 		else
 		{
 			Capsule.bEnable = false;
+		}
+	}
+}
+
+void FAnimNode_KawaiiPhysics::UpdateTaperedCapsuleLimits(TArray<FTaperedCapsuleLimit>& Limits,
+                                                         FComponentSpacePoseContext& Output,
+                                                         const FBoneContainer& BoneContainer,
+                                                         const FTransform& ComponentTransform) const
+{
+	for (auto& TaperedCapsule : Limits)
+	{
+		SCOPE_CYCLE_COUNTER(STAT_KawaiiPhysics_UpdateTaperedCapsuleLimit);
+
+		if (TaperedCapsule.DrivingBone.IsValidToEvaluate(BoneContainer))
+		{
+			const FCompactPoseBoneIndex CompactPoseIndex = TaperedCapsule.DrivingBone.GetCompactPoseIndex(BoneContainer);
+			FTransform BoneTransform = Output.Pose.GetComponentSpaceTransform(CompactPoseIndex);
+
+			FAnimationRuntime::ConvertCSTransformToBoneSpace(ComponentTransform, Output.Pose, BoneTransform,
+			                                                 CompactPoseIndex, BCS_BoneSpace);
+			BoneTransform.SetRotation(TaperedCapsule.OffsetRotation.Quaternion() * BoneTransform.GetRotation());
+			BoneTransform.AddToTranslation(TaperedCapsule.OffsetLocation);
+
+			FAnimationRuntime::ConvertBoneSpaceTransformToCS(ComponentTransform, Output.Pose, BoneTransform,
+			                                                 CompactPoseIndex, BCS_BoneSpace);
+
+			BoneTransform =
+				ConvertSimulationSpaceTransform(Output, EKawaiiPhysicsSimulationSpace::ComponentSpace, SimulationSpace,
+				                                BoneTransform);
+			TaperedCapsule.Location = BoneTransform.GetLocation();
+			TaperedCapsule.Rotation = BoneTransform.GetRotation();
+
+			TaperedCapsule.bEnable = true;
+		}
+		else
+		{
+			TaperedCapsule.bEnable = false;
 		}
 	}
 }
@@ -535,6 +696,48 @@ void FAnimNode_KawaiiPhysics::AdjustByCapsuleCollision(FKawaiiPhysicsModifyBone&
 			{
 				// ボーンがカプセル軸上に乗ると押し出し方向が消えるため軸直交方向を代替に使う
 				PushDir = Capsule.Rotation.GetAxisX();
+			}
+			Bone.Location = ClosestPoint + PushDir * LimitDistance;
+		}
+	}
+}
+
+void FAnimNode_KawaiiPhysics::AdjustByTaperedCapsuleCollision(FKawaiiPhysicsModifyBone& Bone,
+                                                              TArray<FTaperedCapsuleLimit>& Limits)
+{
+	for (auto& TaperedCapsule : Limits)
+	{
+		if (!TaperedCapsule.bEnable || (TaperedCapsule.Radius0 <= 0.0f && TaperedCapsule.Radius1 <= 0.0f))
+		{
+			continue;
+		}
+
+		FVector ClosestPoint = TaperedCapsule.Location;
+		// 負の半径が入り得るため、使用する半径は0以上に丸める。
+		float TaperedRadius = FMath::Max(FMath::Max(TaperedCapsule.Radius0, TaperedCapsule.Radius1), 0.0f);
+
+		if (TaperedCapsule.Length > KINDA_SMALL_NUMBER)
+		{
+			const FVector AxisZ = TaperedCapsule.Rotation.GetAxisZ();
+			const FVector StartPoint = TaperedCapsule.Location + AxisZ * TaperedCapsule.Length * 0.5f;
+			const FVector EndPoint = TaperedCapsule.Location - AxisZ * TaperedCapsule.Length * 0.5f;
+			const FVector Segment = EndPoint - StartPoint;
+			const float T = FMath::Clamp(FVector::DotProduct(Bone.Location - StartPoint, Segment) / Segment.SizeSquared(),
+			                             0.0f, 1.0f);
+			ClosestPoint = StartPoint + Segment * T;
+			// Chaos PhiWithNormal 準拠の近似（厳密な2球凸包SDFではない）
+			TaperedRadius = FMath::Max(FMath::Lerp(TaperedCapsule.Radius0, TaperedCapsule.Radius1, T), 0.0f);
+		}
+
+		const float LimitDistance = Bone.PhysicsSettings.Radius + TaperedRadius;
+		const float DistSquared = (Bone.Location - ClosestPoint).SizeSquared();
+		if (DistSquared < LimitDistance * LimitDistance)
+		{
+			FVector PushDir = (Bone.Location - ClosestPoint).GetSafeNormal();
+			if (PushDir.IsNearlyZero())
+			{
+				// ボーンがカプセル軸上に乗ると押し出し方向が消えるため軸直交方向を代替に使う
+				PushDir = TaperedCapsule.Rotation.GetAxisX();
 			}
 			Bone.Location = ClosestPoint + PushDir * LimitDistance;
 		}
@@ -1043,6 +1246,7 @@ void FAnimNode_KawaiiPhysics::WriteSharedCollisionToSubsystem(
 	// 再割り当てを避けるため事前確保（無効分も含む上限。少量の過剰確保は許容）。
 	Data.SphericalLimits.Reserve(SphericalLimits.Num() + SphericalLimitsData.Num());
 	Data.CapsuleLimits.Reserve(CapsuleLimits.Num() + CapsuleLimitsData.Num());
+	Data.TaperedCapsuleLimits.Reserve(TaperedCapsuleLimits.Num() + TaperedCapsuleLimitsData.Num());
 	Data.BoxLimits.Reserve(BoxLimits.Num() + BoxLimitsData.Num());
 	Data.PlanarLimits.Reserve(PlanarLimits.Num() + PlanarLimitsData.Num());
 
@@ -1051,6 +1255,8 @@ void FAnimNode_KawaiiPhysics::WriteSharedCollisionToSubsystem(
 	ConvertAndAppend(SphericalLimitsData, Data.SphericalLimits, NoOp);
 	ConvertAndAppend(CapsuleLimits,       Data.CapsuleLimits,   NoOp);
 	ConvertAndAppend(CapsuleLimitsData,   Data.CapsuleLimits,   NoOp);
+	ConvertAndAppend(TaperedCapsuleLimits,     Data.TaperedCapsuleLimits, NoOp);
+	ConvertAndAppend(TaperedCapsuleLimitsData, Data.TaperedCapsuleLimits, NoOp);
 	ConvertAndAppend(BoxLimits,           Data.BoxLimits,        NoOp);
 	ConvertAndAppend(BoxLimitsData,       Data.BoxLimits,        NoOp);
 	ConvertAndAppend(PlanarLimits,        Data.PlanarLimits,     RecomputePlane);
@@ -1065,6 +1271,7 @@ void FAnimNode_KawaiiPhysics::UpdateSharedCollisionLimits(
 	SCOPE_CYCLE_COUNTER(STAT_KawaiiPhysics_UpdateSharedCollisionLimits);
 	SharedSphericalLimits.Reset();
 	SharedCapsuleLimits.Reset();
+	SharedTaperedCapsuleLimits.Reset();
 	SharedBoxLimits.Reset();
 	SharedPlanarLimits.Reset();
 
@@ -1106,6 +1313,7 @@ void FAnimNode_KawaiiPhysics::UpdateSharedCollisionLimits(
 
 	ConvertAndStore(SharedCollisionMergedData.SphericalLimits, SharedSphericalLimits, NoOp);
 	ConvertAndStore(SharedCollisionMergedData.CapsuleLimits,   SharedCapsuleLimits,   NoOp);
+	ConvertAndStore(SharedCollisionMergedData.TaperedCapsuleLimits, SharedTaperedCapsuleLimits, NoOp);
 	ConvertAndStore(SharedCollisionMergedData.BoxLimits,       SharedBoxLimits,        NoOp);
 	ConvertAndStore(SharedCollisionMergedData.PlanarLimits,    SharedPlanarLimits,     RecomputePlane);
 }

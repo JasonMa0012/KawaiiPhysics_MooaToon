@@ -116,6 +116,22 @@ void FAnimNode_KawaiiPhysics::AnimDrawDebug(FComponentSpacePoseContext& Output)
 					                                      FColor::Blue, false, -1, LineThickness, SDPG_Foreground);
 				}
 
+				// テーパードカプセルコリジョン
+				for (const auto& TaperedCapsuleLimit : TaperedCapsuleLimits)
+				{
+					this->AnimDrawDebugTaperedCapsule(Output, TaperedCapsuleLimit.Location,
+					                                  TaperedCapsuleLimit.Rotation, TaperedCapsuleLimit.Radius0,
+					                                  TaperedCapsuleLimit.Radius1, TaperedCapsuleLimit.Length,
+					                                  FColor::Orange, LineThickness);
+				}
+				for (const auto& TaperedCapsuleLimit : TaperedCapsuleLimitsData)
+				{
+					this->AnimDrawDebugTaperedCapsule(Output, TaperedCapsuleLimit.Location,
+					                                  TaperedCapsuleLimit.Rotation, TaperedCapsuleLimit.Radius0,
+					                                  TaperedCapsuleLimit.Radius1, TaperedCapsuleLimit.Length,
+					                                  FColor::Blue, LineThickness);
+				}
+
 #if !UE_VERSION_OLDER_THAN(5, 6, 0)
 				// Capsule limit
 				for (const auto& CapsuleLimit : CapsuleLimits)
@@ -169,6 +185,14 @@ void FAnimNode_KawaiiPhysics::AnimDrawDebug(FComponentSpacePoseContext& Output)
 							                                FTransform(PlanarLimit.Rotation, PlanarLimit.Location));
 						AnimInstanceProxy->AnimDrawDebugPlane(PlanarTransformWS, 50.0f,
 						                                      FColor::Green, false, -1, LineThickness, SDPG_Foreground);
+					}
+
+					for (const auto& TaperedCapsuleLimit : SharedTaperedCapsuleLimits)
+					{
+						this->AnimDrawDebugTaperedCapsule(Output, TaperedCapsuleLimit.Location,
+						                                  TaperedCapsuleLimit.Rotation, TaperedCapsuleLimit.Radius0,
+						                                  TaperedCapsuleLimit.Radius1, TaperedCapsuleLimit.Length,
+						                                  FColor::Green, LineThickness);
 					}
 
 #if !UE_VERSION_OLDER_THAN(5, 6, 0)
@@ -247,5 +271,48 @@ void FAnimNode_KawaiiPhysics::AnimDrawDebugBox(FComponentSpacePoseContext& Outpu
 	// +Z / -Z 面：XY平面をカバー
 	DrawFaceRect(FVector(0, 0, E.Z), FVector(0, 0, 1), E.X, E.Y);
 	DrawFaceRect(FVector(0, 0, -E.Z), FVector(0, 0, -1), E.X, E.Y);
+}
+
+void FAnimNode_KawaiiPhysics::AnimDrawDebugTaperedCapsule(FComponentSpacePoseContext& Output,
+                                                          const FVector& CenterLocationSim,
+                                                          const FQuat& RotationSim, float Radius0, float Radius1,
+                                                          float Length, const FColor& Color,
+                                                          float LineThickness) const
+{
+	const auto AnimInstanceProxy = Output.AnimInstanceProxy;
+	if (!AnimInstanceProxy)
+	{
+		return;
+	}
+
+	FTransform TransformWS =
+		ConvertSimulationSpaceTransform(Output, SimulationSpace,
+		                                EKawaiiPhysicsSimulationSpace::WorldSpace,
+		                                FTransform(RotationSim, CenterLocationSim));
+	const FVector CenterWS = TransformWS.GetLocation();
+	const FQuat RotationWS = TransformWS.GetRotation();
+	const float HalfLength = FMath::Max(Length, 0.0f) * 0.5f;
+	const float R0 = FMath::Max(Radius0, 0.0f);
+	const float R1 = FMath::Max(Radius1, 0.0f);
+
+	const FVector AxisX = RotationWS.GetAxisX();
+	const FVector AxisY = RotationWS.GetAxisY();
+	const FVector AxisZ = RotationWS.GetAxisZ();
+	const FVector StartPoint = CenterWS + AxisZ * HalfLength;
+	const FVector EndPoint = CenterWS - AxisZ * HalfLength;
+
+	AnimInstanceProxy->AnimDrawDebugSphere(StartPoint, R0, 8, Color, false, -1,
+	                                       LineThickness, SDPG_Foreground);
+	AnimInstanceProxy->AnimDrawDebugSphere(EndPoint, R1, 8, Color, false, -1,
+	                                       LineThickness, SDPG_Foreground);
+
+	AnimInstanceProxy->AnimDrawDebugLine(StartPoint + AxisX * R0, EndPoint + AxisX * R1, Color, false, -1.0f,
+	                                     LineThickness, SDPG_Foreground);
+	AnimInstanceProxy->AnimDrawDebugLine(StartPoint - AxisX * R0, EndPoint - AxisX * R1, Color, false, -1.0f,
+	                                     LineThickness, SDPG_Foreground);
+	AnimInstanceProxy->AnimDrawDebugLine(StartPoint + AxisY * R0, EndPoint + AxisY * R1, Color, false, -1.0f,
+	                                     LineThickness, SDPG_Foreground);
+	AnimInstanceProxy->AnimDrawDebugLine(StartPoint - AxisY * R0, EndPoint - AxisY * R1, Color, false, -1.0f,
+	                                     LineThickness, SDPG_Foreground);
 }
 #endif

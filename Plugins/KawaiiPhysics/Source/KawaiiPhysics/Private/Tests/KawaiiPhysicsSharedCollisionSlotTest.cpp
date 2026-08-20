@@ -40,6 +40,14 @@ namespace
 		Capsule.bEnable = true;
 		Data.CapsuleLimits.Add(Capsule);
 
+		FTaperedCapsuleLimit TaperedCapsule;
+		TaperedCapsule.Location = FVector(Base + 40.0f, Base + 41.0f, Base + 42.0f);
+		TaperedCapsule.Radius0 = Base + 43.0f;
+		TaperedCapsule.Radius1 = Base + 44.0f;
+		TaperedCapsule.Length = Base + 45.0f;
+		TaperedCapsule.bEnable = true;
+		Data.TaperedCapsuleLimits.Add(TaperedCapsule);
+
 		FBoxLimit Box;
 		Box.Location = FVector(Base + 20.0f, Base + 21.0f, Base + 22.0f);
 		Box.Extent = FVector(Base + 23.0f, Base + 24.0f, Base + 25.0f);
@@ -82,6 +90,7 @@ bool FKawaiiPhysicsSharedCollisionSourceSlotTest::RunTest(const FString& Paramet
 
 		TestTrue(TEXT("Published data appends one sphere"), OutData.SphericalLimits.Num() == 1);
 		TestTrue(TEXT("Published data appends one capsule"), OutData.CapsuleLimits.Num() == 1);
+		TestTrue(TEXT("Published data appends one tapered capsule"), OutData.TaperedCapsuleLimits.Num() == 1);
 		TestTrue(TEXT("Published data appends one box"), OutData.BoxLimits.Num() == 1);
 		TestTrue(TEXT("Published data appends one plane"), OutData.PlanarLimits.Num() == 1);
 		TestTrue(TEXT("Sphere location is preserved"),
@@ -92,6 +101,18 @@ bool FKawaiiPhysicsSharedCollisionSourceSlotTest::RunTest(const FString& Paramet
 		         OutData.CapsuleLimits[0].Location.Equals(FVector(20.0f, 21.0f, 22.0f), GSharedCollisionSlotTol));
 		TestTrue(TEXT("Capsule radius is preserved"),
 		         FMath::IsNearlyEqual(OutData.CapsuleLimits[0].Radius, 23.0f, GSharedCollisionSlotTol));
+		TestTrue(TEXT("Tapered capsule location is preserved"),
+		         OutData.TaperedCapsuleLimits[0].Location.Equals(FVector(50.0f, 51.0f, 52.0f),
+		                                                          GSharedCollisionSlotTol));
+		TestTrue(TEXT("Tapered capsule Radius0 is preserved"),
+		         FMath::IsNearlyEqual(OutData.TaperedCapsuleLimits[0].Radius0, 53.0f,
+		                              GSharedCollisionSlotTol));
+		TestTrue(TEXT("Tapered capsule Radius1 is preserved"),
+		         FMath::IsNearlyEqual(OutData.TaperedCapsuleLimits[0].Radius1, 54.0f,
+		                              GSharedCollisionSlotTol));
+		TestTrue(TEXT("Tapered capsule length is preserved"),
+		         FMath::IsNearlyEqual(OutData.TaperedCapsuleLimits[0].Length, 55.0f,
+		                              GSharedCollisionSlotTol));
 		TestTrue(TEXT("Box extent is preserved"),
 		         OutData.BoxLimits[0].Extent.Equals(FVector(33.0f, 34.0f, 35.0f), GSharedCollisionSlotTol));
 		TestTrue(TEXT("Planar limit is preserved"),
@@ -110,6 +131,7 @@ bool FKawaiiPhysicsSharedCollisionSourceSlotTest::RunTest(const FString& Paramet
 
 		TestTrue(TEXT("Second publish replaces spherical data"), OutData.SphericalLimits.Num() == 2);
 		TestTrue(TEXT("Second publish removes old capsule data"), OutData.CapsuleLimits.Num() == 0);
+		TestTrue(TEXT("Second publish removes old tapered capsule data"), OutData.TaperedCapsuleLimits.Num() == 0);
 		TestTrue(TEXT("Second publish removes old box data"), OutData.BoxLimits.Num() == 0);
 		TestTrue(TEXT("Second publish removes old planar data"), OutData.PlanarLimits.Num() == 0);
 		TestTrue(TEXT("Second publish first sphere radius"),

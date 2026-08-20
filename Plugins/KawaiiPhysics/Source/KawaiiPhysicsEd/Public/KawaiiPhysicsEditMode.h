@@ -58,6 +58,7 @@ private:
 	/** Render each collision limit */
 	void RenderSphericalLimits(FPrimitiveDrawInterface* PDI) const;
 	void RenderCapsuleLimit(FPrimitiveDrawInterface* PDI) const;
+	void RenderTaperedCapsuleLimit(FPrimitiveDrawInterface* PDI) const;
 	void RenderBoxLimit(FPrimitiveDrawInterface* PDI) const;
 	void RenderPlanerLimit(FPrimitiveDrawInterface* PDI);
 

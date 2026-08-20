@@ -23,6 +23,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_UpdatePlanerLimit"), STAT_KawaiiPh
 DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_WarmUp"), STAT_KawaiiPhysics_WarmUp, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_UpdatePhysicsSetting"), STAT_KawaiiPhysics_UpdatePhysicsSetting, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_UpdateCapsuleLimit"), STAT_KawaiiPhysics_UpdateCapsuleLimit, STATGROUP_Anim, KAWAIIPHYSICS_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_UpdateTaperedCapsuleLimit"), STAT_KawaiiPhysics_UpdateTaperedCapsuleLimit, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_UpdateBoxLimit"), STAT_KawaiiPhysics_UpdateBoxLimit, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_UpdateModifyBonesPoseTransform"), STAT_KawaiiPhysics_UpdateModifyBonesPoseTransform, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_ApplySimulateResult"), STAT_KawaiiPhysics_ApplySimulateResult, STATGROUP_Anim, KAWAIIPHYSICS_API);
@@ -47,6 +48,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("KawaiiPhysics_AdjustByLimitsAndLength"), STAT_Ka
 // 入力規模カウンタ（負荷=N×L等の相関用） / Input-size counters (correlate load = N×L, etc.)
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("KawaiiPhysics_NumSphereColliders"), STAT_KawaiiPhysics_NumSphereColliders, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("KawaiiPhysics_NumCapsuleColliders"), STAT_KawaiiPhysics_NumCapsuleColliders, STATGROUP_Anim, KAWAIIPHYSICS_API);
+DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("KawaiiPhysics_NumTaperedCapsuleColliders"), STAT_KawaiiPhysics_NumTaperedCapsuleColliders, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("KawaiiPhysics_NumBoxColliders"), STAT_KawaiiPhysics_NumBoxColliders, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("KawaiiPhysics_NumPlanarColliders"), STAT_KawaiiPhysics_NumPlanarColliders, STATGROUP_Anim, KAWAIIPHYSICS_API);
 DECLARE_DWORD_COUNTER_STAT_EXTERN(TEXT("KawaiiPhysics_NumSharedColliders"), STAT_KawaiiPhysics_NumSharedColliders, STATGROUP_Anim, KAWAIIPHYSICS_API);
