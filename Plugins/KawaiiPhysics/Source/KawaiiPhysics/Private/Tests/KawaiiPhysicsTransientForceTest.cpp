@@ -198,7 +198,7 @@ bool FKawaiiPhysicsTransientForceLiveObjectReferenceDetectionTest::RunTest(const
 		bOk &= TestNotNull(TEXT("External force pointer"), ExternalForce);
 		if (ExternalForce)
 		{
-			ExternalForce->ExternalOwner = NewObject<UCurveFloat>(GetTransientPackage());
+			ExternalForce->ExternalOwner = NewObject<UCurveFloat>(GetTransientPackageAsObject());
 		}
 
 		bOk &= TestTrue(TEXT("ExternalOwner live UObject reference is detected"),
@@ -212,7 +212,7 @@ bool FKawaiiPhysicsTransientForceLiveObjectReferenceDetectionTest::RunTest(const
 		bOk &= TestNotNull(TEXT("Curve force pointer"), CurveForce);
 		if (CurveForce)
 		{
-			CurveForce->ForceRateByBoneLengthRate.ExternalCurve = NewObject<UCurveFloat>(GetTransientPackage());
+			CurveForce->ForceRateByBoneLengthRate.ExternalCurve = NewObject<UCurveFloat>(GetTransientPackageAsObject());
 		}
 
 		bOk &= TestTrue(TEXT("RuntimeFloatCurve ExternalCurve live UObject reference is detected"),
