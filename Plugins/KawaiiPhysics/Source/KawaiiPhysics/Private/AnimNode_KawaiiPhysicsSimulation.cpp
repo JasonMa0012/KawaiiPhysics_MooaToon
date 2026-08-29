@@ -34,6 +34,9 @@
 #include "KawaiiPhysics.h"
 #include "AnimNode_KawaiiPhysicsInternal.h"
 
+// SimpleWorldCollision CVar（AnimNode_KawaiiPhysics.cpp で定義）
+extern TAutoConsoleVariable<int32> CVarSimpleWorldCollisionEnable;
+
 namespace
 {
 	constexpr float TransientGustLifetimeMargin = 0.2f;
@@ -160,14 +163,29 @@ namespace
 	}
 }
 
-FKawaiiPhysicsSettingsScale FAnimNode_KawaiiPhysics::ComputeEffectivePhysicsSettingsOverrideScale() const
+FKawaiiPhysicsSettingsMultiplier FAnimNode_KawaiiPhysics::ComputeEffectivePhysicsSettingsMultiplierScale() const
 {
-	FKawaiiPhysicsSettingsScale Effective;
+	FKawaiiPhysicsSettingsMultiplier Effective;
 
-	for (const FKawaiiPhysicsActiveSettingsOverride& Item : TransientForceStore.SettingsOverrideItems)
+	for (const FKawaiiPhysicsActiveSettingsMultiplier& Item : TransientForceStore.SettingsMultiplierItems)
 	{
-		const float EnvelopeAlpha = Item.PeakAlpha * KawaiiPhysics::EvaluateEnvelopeAlpha01(
-			Item.RiseTime, Item.HoldTime, Item.DecayTime, Item.ElapsedTime);
+		float EnvelopeAlpha = 0.0f;
+		if (Item.bExternallyDriven)
+		{
+			EnvelopeAlpha = Item.DrivenAlpha;
+		}
+		else if (Item.bInfiniteHold)
+		{
+			const float RiseAlpha = Item.RiseTime > 0.0f
+				                        ? FMath::Clamp(Item.ElapsedTime / Item.RiseTime, 0.0f, 1.0f)
+				                        : 1.0f;
+			EnvelopeAlpha = Item.PeakAlpha * RiseAlpha;
+		}
+		else
+		{
+			EnvelopeAlpha = Item.PeakAlpha * KawaiiPhysics::EvaluateEnvelopeAlpha01(
+				Item.RiseTime, Item.HoldTime, Item.DecayTime, Item.ElapsedTime);
+		}
 
 		Effective.Damping *= FMath::Lerp(1.0f, Item.Scale.Damping, EnvelopeAlpha);
 		Effective.Stiffness *= FMath::Lerp(1.0f, Item.Scale.Stiffness, EnvelopeAlpha);
@@ -185,7 +203,7 @@ void FAnimNode_KawaiiPhysics::UpdatePhysicsSettingsOfModifyBones()
 	SCOPE_CYCLE_COUNTER(STAT_KawaiiPhysics_UpdatePhysicsSetting);
 
 	// αはボーンに依存しないためループ前に1回だけ解決する
-	const FKawaiiPhysicsSettingsScale OverrideScale = ComputeEffectivePhysicsSettingsOverrideScale();
+	const FKawaiiPhysicsSettingsMultiplier OverrideScale = ComputeEffectivePhysicsSettingsMultiplierScale();
 
 	const FRichCurve* DampingCurve = DampingCurveData.GetRichCurveConst();
 	const FRichCurve* WorldDampingLocationCurve = WorldDampingLocationCurveData.GetRichCurveConst();
@@ -277,7 +295,7 @@ void FAnimNode_KawaiiPhysics::UpdatePhysicsSettingsOfModifyBones()
 	}
 }
 
-void FAnimNode_KawaiiPhysics::ConsumeAndSweepTransientExternalForces(const float InFrameDeltaTime)
+void FAnimNode_KawaiiPhysics::ConsumeAndRemoveExpiredTransientExternalForces(const float InFrameDeltaTime)
 {
 	for (int32 i = TransientForceStore.Items.Num() - 1; i >= 0; --i)
 	{
@@ -365,31 +383,132 @@ void FAnimNode_KawaiiPhysics::ConsumeAndSweepTransientExternalForces(const float
 	}
 }
 
-bool FAnimNode_KawaiiPhysics::ConsumeAndAdvancePhysicsSettingsOverrides(const float InFrameDeltaTime)
+bool FAnimNode_KawaiiPhysics::ConsumeAndAdvancePhysicsSettingsMultipliers(const float InFrameDeltaTime)
 {
-	// 取り込み前に進めることで、このフレームで積まれた分は α=0（rise 開始点）から始まる
-	for (FKawaiiPhysicsActiveSettingsOverride& Item : TransientForceStore.SettingsOverrideItems)
+	auto FindSettingsMultiplierByHandle =
+		[this](const int64 HandleId) -> FKawaiiPhysicsActiveSettingsMultiplier*
+		{
+			for (FKawaiiPhysicsActiveSettingsMultiplier& Item : TransientForceStore.SettingsMultiplierItems)
+			{
+				if (Item.HandleId == HandleId)
+				{
+					return &Item;
+				}
+			}
+			return nullptr;
+		};
+
+	auto StopSettingsMultiplierAtIndex =
+		[this](const int32 Index, const float BlendOutTime)
+		{
+			if (!TransientForceStore.SettingsMultiplierItems.IsValidIndex(Index))
+			{
+				return;
+			}
+
+			FKawaiiPhysicsActiveSettingsMultiplier& Item = TransientForceStore.SettingsMultiplierItems[Index];
+			if (BlendOutTime <= KINDA_SMALL_NUMBER)
+			{
+				TransientForceStore.SettingsMultiplierItems.RemoveAt(Index);
+				return;
+			}
+
+			if (Item.bExternallyDriven)
+			{
+				Item.PeakAlpha = Item.DrivenAlpha;
+			}
+			else
+			{
+				// 現在の適用率を PeakAlpha へ畳み込み、そこから decay だけのエンベロープでフェードさせる。
+				// 乗算なのでフェード中の再Stopでも適用率が跳ね上がらない
+				const float CurrentAlpha = Item.bInfiniteHold
+					                           ? (Item.RiseTime > 0.0f
+						                              ? FMath::Clamp(Item.ElapsedTime / Item.RiseTime, 0.0f, 1.0f)
+						                              : 1.0f)
+					                           : KawaiiPhysics::EvaluateEnvelopeAlpha01(
+						                           Item.RiseTime, Item.HoldTime, Item.DecayTime, Item.ElapsedTime);
+				Item.PeakAlpha *= CurrentAlpha;
+			}
+
+			Item.bInfiniteHold = false;
+			Item.bExternallyDriven = false;
+			Item.DrivenAlpha = 0.0f;
+			Item.LeaseEvaluations = 0;
+			Item.LeaseRemaining = 0;
+			Item.LeaseExpireBlendOutTime = 0.2f;
+			Item.RiseTime = 0.0f;
+			Item.HoldTime = 0.0f;
+			Item.DecayTime = BlendOutTime;
+			Item.ElapsedTime = 0.0f;
+		};
+
+	// 取り込み前に進めることで、このフレームで積まれた時間型は α=0（rise 開始点）から始まる
+	for (FKawaiiPhysicsActiveSettingsMultiplier& Item : TransientForceStore.SettingsMultiplierItems)
 	{
 		Item.ElapsedTime += InFrameDeltaTime;
+		if (Item.bExternallyDriven && Item.LeaseEvaluations > 0)
+		{
+			--Item.LeaseRemaining;
+		}
 	}
 
-	TArray<FKawaiiPhysicsSettingsOverrideRequest> PendingOverrides;
+	TArray<FKawaiiPhysicsSettingsMultiplierPushRequest> PendingSets;
+	TArray<FKawaiiPhysicsSettingsMultiplierRequest> PendingOverrides;
 	TArray<FKawaiiPhysicsTransientForceStopRequest> PendingStops;
 	if (TransientForceStore.Queue.IsValid())
 	{
 		FScopeLock Lock(&TransientForceStore.Queue->Mutex);
-		PendingOverrides = MoveTemp(TransientForceStore.Queue->PendingSettingsOverrides);
-		PendingStops = MoveTemp(TransientForceStore.Queue->PendingSettingsOverrideStops);
+		PendingSets = MoveTemp(TransientForceStore.Queue->PendingSettingsMultiplierPushes);
+		PendingOverrides = MoveTemp(TransientForceStore.Queue->PendingSettingsMultipliers);
+		PendingStops = MoveTemp(TransientForceStore.Queue->PendingSettingsMultiplierStops);
 	}
 
-	for (const FKawaiiPhysicsSettingsOverrideRequest& PendingOverride : PendingOverrides)
+	for (const FKawaiiPhysicsSettingsMultiplierPushRequest& PendingSet : PendingSets)
 	{
-		FKawaiiPhysicsActiveSettingsOverride& Item = TransientForceStore.SettingsOverrideItems.AddDefaulted_GetRef();
+		if (PendingSet.HandleId == 0)
+		{
+			continue;
+		}
+
+		FKawaiiPhysicsActiveSettingsMultiplier* Item = FindSettingsMultiplierByHandle(PendingSet.HandleId);
+		if (!Item)
+		{
+			Item = &TransientForceStore.SettingsMultiplierItems.AddDefaulted_GetRef();
+			Item->HandleId = PendingSet.HandleId;
+		}
+
+		Item->Scale = PendingSet.Scale;
+		Item->DrivenAlpha = PendingSet.Alpha;
+		Item->LeaseEvaluations = PendingSet.LeaseEvaluations;
+		Item->LeaseRemaining = PendingSet.LeaseEvaluations;
+		Item->LeaseExpireBlendOutTime = PendingSet.LeaseExpireBlendOutTime;
+		Item->bInfiniteHold = false;
+		Item->bExternallyDriven = true;
+		Item->PeakAlpha = 1.0f;
+		Item->RiseTime = 0.0f;
+		Item->HoldTime = 0.0f;
+		Item->DecayTime = 0.0f;
+		Item->ElapsedTime = 0.0f;
+	}
+
+	for (const FKawaiiPhysicsSettingsMultiplierRequest& PendingOverride : PendingOverrides)
+	{
+		FKawaiiPhysicsActiveSettingsMultiplier* ExistingItem = FindSettingsMultiplierByHandle(PendingOverride.HandleId);
+		FKawaiiPhysicsActiveSettingsMultiplier& Item =
+			ExistingItem ? *ExistingItem : TransientForceStore.SettingsMultiplierItems.AddDefaulted_GetRef();
 		Item.Scale = PendingOverride.Scale;
 		Item.RiseTime = PendingOverride.RiseTime;
 		Item.HoldTime = PendingOverride.HoldTime;
 		Item.DecayTime = PendingOverride.DecayTime;
+		Item.ElapsedTime = 0.0f;
+		Item.PeakAlpha = 1.0f;
 		Item.HandleId = PendingOverride.HandleId;
+		Item.bInfiniteHold = PendingOverride.bInfiniteHold;
+		Item.bExternallyDriven = false;
+		Item.DrivenAlpha = 0.0f;
+		Item.LeaseEvaluations = 0;
+		Item.LeaseRemaining = 0;
+		Item.LeaseExpireBlendOutTime = 0.2f;
 	}
 
 	for (const FKawaiiPhysicsTransientForceStopRequest& PendingStop : PendingStops)
@@ -399,49 +518,71 @@ bool FAnimNode_KawaiiPhysics::ConsumeAndAdvancePhysicsSettingsOverrides(const fl
 			continue;
 		}
 
-		for (int32 i = TransientForceStore.SettingsOverrideItems.Num() - 1; i >= 0; --i)
+		for (int32 i = TransientForceStore.SettingsMultiplierItems.Num() - 1; i >= 0; --i)
 		{
-			FKawaiiPhysicsActiveSettingsOverride& Item = TransientForceStore.SettingsOverrideItems[i];
+			FKawaiiPhysicsActiveSettingsMultiplier& Item = TransientForceStore.SettingsMultiplierItems[i];
 			if (Item.HandleId != PendingStop.HandleId)
 			{
 				continue;
 			}
 
-			if (PendingStop.BlendOutTime <= KINDA_SMALL_NUMBER)
-			{
-				TransientForceStore.SettingsOverrideItems.RemoveAt(i);
-				continue;
-			}
-
-			// 現在の適用率を PeakAlpha へ畳み込み、そこから decay だけのエンベロープでフェードさせる。
-			// 乗算なのでフェード中の再Stopでも適用率が跳ね上がらない
-			Item.PeakAlpha *= KawaiiPhysics::EvaluateEnvelopeAlpha01(Item.RiseTime, Item.HoldTime, Item.DecayTime,
-			                                                        Item.ElapsedTime);
-			Item.RiseTime = 0.0f;
-			Item.HoldTime = 0.0f;
-			Item.DecayTime = PendingStop.BlendOutTime;
-			Item.ElapsedTime = 0.0f;
+			StopSettingsMultiplierAtIndex(i, PendingStop.BlendOutTime);
 		}
 	}
 
-	for (int32 i = TransientForceStore.SettingsOverrideItems.Num() - 1; i >= 0; --i)
+	for (int32 i = TransientForceStore.SettingsMultiplierItems.Num() - 1; i >= 0; --i)
 	{
-		const FKawaiiPhysicsActiveSettingsOverride& Item = TransientForceStore.SettingsOverrideItems[i];
-		if (Item.ElapsedTime >= Item.RiseTime + Item.HoldTime + Item.DecayTime)
+		const FKawaiiPhysicsActiveSettingsMultiplier& Item = TransientForceStore.SettingsMultiplierItems[i];
+		if (!Item.bExternallyDriven || Item.LeaseEvaluations <= 0 || Item.LeaseRemaining > 0)
 		{
-			TransientForceStore.SettingsOverrideItems.RemoveAt(i);
+			continue;
+		}
+
+		UE_LOG(LogKawaiiPhysics, Verbose,
+		       TEXT("Externally driven physics settings multiplier lease expired. HandleId=%lld BlendOutTime=%.3f"),
+		       static_cast<long long>(Item.HandleId), Item.LeaseExpireBlendOutTime);
+		StopSettingsMultiplierAtIndex(i, Item.LeaseExpireBlendOutTime);
+	}
+
+	for (int32 i = TransientForceStore.SettingsMultiplierItems.Num() - 1; i >= 0; --i)
+	{
+		const FKawaiiPhysicsActiveSettingsMultiplier& Item = TransientForceStore.SettingsMultiplierItems[i];
+		if (!Item.bExternallyDriven && !Item.bInfiniteHold &&
+			Item.ElapsedTime >= Item.RiseTime + Item.HoldTime + Item.DecayTime)
+		{
+			TransientForceStore.SettingsMultiplierItems.RemoveAt(i);
 		}
 	}
 
-	while (TransientForceStore.SettingsOverrideItems.Num() > MaxPhysicsSettingsOverrides)
+	while (TransientForceStore.SettingsMultiplierItems.Num() > MaxPhysicsSettingsMultipliers)
 	{
-		UE_LOG(LogKawaiiPhysics, Verbose,
-		       TEXT("Physics settings override cap exceeded; dropping oldest override. HandleId=%lld"),
-		       static_cast<long long>(TransientForceStore.SettingsOverrideItems[0].HandleId));
-		TransientForceStore.SettingsOverrideItems.RemoveAt(0);
+		const FKawaiiPhysicsActiveSettingsMultiplier& DroppedItem = TransientForceStore.SettingsMultiplierItems[0];
+#if !UE_BUILD_SHIPPING
+		if (DroppedItem.bInfiniteHold &&
+			!WarnedInfiniteHoldSettingsMultiplierEvictionHandleIds.Contains(DroppedItem.HandleId))
+		{
+			if (WarnedInfiniteHoldSettingsMultiplierEvictionHandleIds.Num() >= MaxWarnedInfiniteHoldSettingsMultiplierEvictionHandleIds)
+			{
+				// 再 init まで無制限に増えないよう上限で丸ごとリセット。警告が再度出ることは許容
+				WarnedInfiniteHoldSettingsMultiplierEvictionHandleIds.Reset();
+			}
+			WarnedInfiniteHoldSettingsMultiplierEvictionHandleIds.Add(DroppedItem.HandleId);
+			UE_LOG(LogKawaiiPhysics, Warning,
+			       TEXT("Infinite-hold physics settings multiplier cap exceeded; dropping oldest override. HandleId=%lld Type=InfiniteHold"),
+			       static_cast<long long>(DroppedItem.HandleId));
+		}
+		else
+#endif
+		{
+			UE_LOG(LogKawaiiPhysics, Verbose,
+			       TEXT("Physics settings multiplier cap exceeded; dropping oldest override. HandleId=%lld Type=%s"),
+			       static_cast<long long>(DroppedItem.HandleId),
+			       DroppedItem.bExternallyDriven ? TEXT("Driven") : (DroppedItem.bInfiniteHold ? TEXT("InfiniteHold") : TEXT("Timed")));
+		}
+		TransientForceStore.SettingsMultiplierItems.RemoveAt(0);
 	}
 
-	return !TransientForceStore.SettingsOverrideItems.IsEmpty();
+	return !TransientForceStore.SettingsMultiplierItems.IsEmpty();
 }
 
 
@@ -459,6 +600,12 @@ void FAnimNode_KawaiiPhysics::SimulateModifyBones(FComponentSpacePoseContext& Ou
 	FrameDeltaTime = DeltaTime;
 
 	const USkeletalMeshComponent* SkelComp = Output.AnimInstanceProxy->GetSkelMeshComponent();
+
+	// World Collision のクエリ設定はフレーム内で不変のため、サブステップ×ボーンのループ前に一度だけ構築する
+	if (bAllowWorldCollision && SkelComp)
+	{
+		PrepareWorldCollisionQueryCaches(SkelComp);
+	}
 
 	// Prev/Pose 情報を保存し、SkipSimulate を判定
 	for (FKawaiiPhysicsModifyBone& Bone : ModifyBones)
@@ -785,6 +932,8 @@ void FAnimNode_KawaiiPhysics::SimulateOnce(FComponentSpacePoseContext& Output,
 	// （ボーン数が多いケースで負荷増）、従来どおりボーン外側の1パスで全形状を処理する。
 	// World判定の時間は関数内の既存STAT（STAT_KawaiiPhysics_WorldCollision）で計測する。
 	int32 NumWorldChecks = 0;
+	// CVarでの全体無効化を毎ボーンで再判定しないようループ外でキャッシュ（Updateブロックと同じ条件）
+	const bool bApplySimpleWorldCollision = bUseSimpleWorldCollision && CVarSimpleWorldCollisionEnable.GetValueOnAnyThread();
 	for (FKawaiiPhysicsModifyBone& Bone : ModifyBones)
 	{
 		if (Bone.bSkipSimulate)
@@ -802,8 +951,8 @@ void FAnimNode_KawaiiPhysics::SimulateOnce(FComponentSpacePoseContext& Output,
 		AdjustByTaperedCapsuleCollision(Bone, TaperedCapsuleLimitsData);
 		AdjustByBoxCollision(Bone, BoxLimits);
 		AdjustByBoxCollision(Bone, BoxLimitsData);
-		AdjustByPlanerCollision(Bone, PlanarLimits);
-		AdjustByPlanerCollision(Bone, PlanarLimitsData);
+		AdjustByPlanarCollision(Bone, PlanarLimits);
+		AdjustByPlanarCollision(Bone, PlanarLimitsData);
 
 		// 共有コリジョン（他の KawaiiPhysics ノードから）
 		if (bUseSharedCollision && !bSharedCollisionSource)
@@ -812,7 +961,16 @@ void FAnimNode_KawaiiPhysics::SimulateOnce(FComponentSpacePoseContext& Output,
 			AdjustByCapsuleCollision(Bone, SharedCapsuleLimits);
 			AdjustByTaperedCapsuleCollision(Bone, SharedTaperedCapsuleLimits);
 			AdjustByBoxCollision(Bone, SharedBoxLimits);
-			AdjustByPlanerCollision(Bone, SharedPlanarLimits);
+			AdjustByPlanarCollision(Bone, SharedPlanarLimits);
+		}
+
+		// シンプルワールドコリジョン（Subsystemが収集したレベル上のsimple collision）
+		if (bApplySimpleWorldCollision)
+		{
+			AdjustBySphereCollision(Bone, SimpleWorldSphericalLimits);
+			AdjustByCapsuleCollision(Bone, SimpleWorldCapsuleLimits);
+			AdjustByTaperedCapsuleCollision(Bone, SimpleWorldTaperedCapsuleLimits);
+			AdjustByBoxCollision(Bone, SimpleWorldBoxLimits);
 		}
 
 		if (bAllowWorldCollision)

@@ -5,9 +5,11 @@
 #include "Misc/EngineVersionComparison.h"
 #include "BoneContainer.h"
 #include "BonePose.h"
+#include "Containers/Set.h"
 #include "GameplayTagContainer.h"
 #include "BoneControllers/AnimNode_AnimDynamics.h"
 #include "BoneControllers/AnimNode_SkeletalControlBase.h"
+#include "CollisionQueryParams.h"
 #include "Engine/HitResult.h"
 #include "HAL/CriticalSection.h"
 #include "Templates/SharedPointer.h"
@@ -25,6 +27,7 @@
 
 #include "KawaiiPhysicsSyncBone.h"
 #include "KawaiiPhysicsCollisionLimits.h"
+#include "KawaiiPhysicsSimpleWorldCollision.h"
 #include "KawaiiPhysicsSharedCollisionSubsystem.h"
 #include "KawaiiPhysicsTypes.h"
 #include "KawaiiPhysicsBoneConstraintTypes.h"
@@ -72,20 +75,31 @@ struct FKawaiiPhysicsTransientForceStopRequest
 	float BlendOutTime = 0.0f;
 };
 
-// 物理設定の一時倍率オーバーライドの構築リクエスト
-struct FKawaiiPhysicsSettingsOverrideRequest
+// 物理設定の一時倍率の構築リクエスト
+struct FKawaiiPhysicsSettingsMultiplierRequest
 {
-	FKawaiiPhysicsSettingsScale Scale;
+	FKawaiiPhysicsSettingsMultiplier Scale;
 	float RiseTime = 0.0f;
 	float HoldTime = 0.0f;
 	float DecayTime = 0.0f;
 	int64 HandleId = 0;
+	bool bInfiniteHold = false; // ピークで Stop まで保持（Duration < 0） / Hold at peak until Stop (Duration < 0)
 };
 
-// 実行中の物理設定の一時倍率オーバーライド
-struct FKawaiiPhysicsActiveSettingsOverride
+// 外部駆動の物理設定倍率の Push リクエスト
+struct FKawaiiPhysicsSettingsMultiplierPushRequest
 {
-	FKawaiiPhysicsSettingsScale Scale;
+	FKawaiiPhysicsSettingsMultiplier Scale;
+	float Alpha = 1.0f;                   // 0..1 クランプ済み
+	int64 HandleId = 0;                   // 0 は無効
+	int32 LeaseEvaluations = 0;           // 0=無期限。N回の評価でSetを受けなければ自動フェード
+	float LeaseExpireBlendOutTime = 0.2f; // リース失効時のフェード秒
+};
+
+// 実行中の物理設定の一時倍率
+struct FKawaiiPhysicsActiveSettingsMultiplier
+{
+	FKawaiiPhysicsSettingsMultiplier Scale;
 	float RiseTime = 0.0f;
 	float HoldTime = 0.0f;
 	float DecayTime = 0.0f;
@@ -93,6 +107,12 @@ struct FKawaiiPhysicsActiveSettingsOverride
 	// 停止時にそれまでの適用率を退避し、そこを起点にフェードアウトさせるための係数
 	float PeakAlpha = 1.0f;
 	int64 HandleId = 0;
+	bool bInfiniteHold = false; // ピークで Stop まで保持（Duration < 0） / Hold at peak until Stop (Duration < 0)
+	bool bExternallyDriven = false; // 外部駆動項目。内部時間では消えず Stop/リース失効でのみフェード/除去
+	float DrivenAlpha = 0.0f;       // 外部駆動時の適用率（0..1）
+	int32 LeaseEvaluations = 0;     // 0=無期限
+	int32 LeaseRemaining = 0;       // Set のたびに LeaseEvaluations へリセット、評価ごとに減算
+	float LeaseExpireBlendOutTime = 0.2f;
 };
 
 // 任意スレッドからの一時外力キュー
@@ -102,15 +122,16 @@ struct FKawaiiPhysicsTransientForceQueue
 	TArray<FKawaiiPhysicsTransientExternalForce> PendingForces;
 	TArray<FKawaiiPhysicsTransientGustRequest> PendingGusts;
 	TArray<FKawaiiPhysicsTransientForceStopRequest> PendingStops;
-	TArray<FKawaiiPhysicsSettingsOverrideRequest> PendingSettingsOverrides;
-	TArray<FKawaiiPhysicsTransientForceStopRequest> PendingSettingsOverrideStops;
+	TArray<FKawaiiPhysicsSettingsMultiplierRequest> PendingSettingsMultipliers;
+	TArray<FKawaiiPhysicsSettingsMultiplierPushRequest> PendingSettingsMultiplierPushes;
+	TArray<FKawaiiPhysicsTransientForceStopRequest> PendingSettingsMultiplierStops;
 };
 
 // worker専用ストアと共有キュー
 struct FKawaiiPhysicsTransientForceStore
 {
 	TArray<FKawaiiPhysicsTransientExternalForce> Items;
-	TArray<FKawaiiPhysicsActiveSettingsOverride> SettingsOverrideItems;
+	TArray<FKawaiiPhysicsActiveSettingsMultiplier> SettingsMultiplierItems;
 	TSharedPtr<FKawaiiPhysicsTransientForceQueue, ESPMode::ThreadSafe> Queue =
 		MakeShared<FKawaiiPhysicsTransientForceQueue, ESPMode::ThreadSafe>();
 
@@ -489,6 +510,8 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 
 	/** 共有コリジョンの再初期化を要求 / Request shared collision reinitialization */
 	void RequestSharedCollisionReinit() { bSharedCollisionNeedsReinit = true; }
+	/** シンプルワールドコリジョンの再初期化を要求 / Request simple world collision reinitialization */
+	void RequestSimpleWorldCollisionReinit();
 	/** ボーン構造に依存する設定変更後の再初期化を要求 / Request modify-bone rebuild after topology-affecting settings change */
 	void RequestModifyBonesReinit() { bModifyBonesNeedsReinit = true; }
 
@@ -629,14 +652,18 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	TArray<FInstancedStruct> ExternalForces;
 
 	FKawaiiPhysicsTransientForceStore TransientForceStore;
+#if !UE_BUILD_SHIPPING
+	TSet<int64> WarnedInfiniteHoldSettingsMultiplierEvictionHandleIds;
+	static constexpr int32 MaxWarnedInfiniteHoldSettingsMultiplierEvictionHandleIds = 64;
+#endif
 	static constexpr int32 MaxTransientExternalForces = 8;
-	static constexpr int32 MaxPhysicsSettingsOverrides = 8;
+	static constexpr int32 MaxPhysicsSettingsMultipliers = 8;
 	// InheritForceIndex 用センチネル: 有効な authored ProceduralWind すべてに 1 つずつ transient 突風を展開する（展開はノードの一時外力上限 MaxTransientExternalForces の範囲内）
 	// Sentinel for InheritForceIndex: spawn one transient gust per enabled authored ProceduralWind (expansion is bounded by MaxTransientExternalForces).
 	static constexpr int32 TransientGustInheritAllWinds = -2;
 
 	// 一時外力ハンドルIDを生成する。ID は同期データを運ばず payload はキュー Mutex 保護のため relaxed で十分。
-	static int64 GenerateTransientForceHandleId();
+	static int64 GenerateTransientHandleId();
 
 	/**
 	 * 実行時専用の一時外力をリクエストする。任意スレッド可で、Mutex 保護されたキューへ積む。
@@ -668,42 +695,53 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	 * キュー済み一時外力を worker で取り込み、寿命切れを掃除する。worker 専用で 1 evaluate 1 回だけ呼ぶ。
 	 * BP再コンパイルやノード再初期化で失われる。Initialize(Context) は呼ばれないため汎用外力では制限あり
 	 * （ProceduralWind は PreApply で RuntimeState を遅延生成するため安全）。
-	 * Consume queued transient forces on the worker and sweep expired entries. Worker-only; call once per evaluate.
+	 * Consume queued transient forces on the worker and remove expired entries. Worker-only; call once per evaluate.
 	 * Lost on BP recompile or node re-init. Initialize(Context) is not called, which limits generic use
 	 * (ProceduralWind is safe because it lazily creates RuntimeState in PreApply).
 	 */
-	void ConsumeAndSweepTransientExternalForces(float InFrameDeltaTime);
+	void ConsumeAndRemoveExpiredTransientExternalForces(float InFrameDeltaTime);
 
 	/**
-	 * 物理設定への一時倍率オーバーライドをリクエストする。任意スレッド可で、Mutex 保護されたキューへ積む。
+	 * 物理設定への一時倍率をリクエストする。任意スレッド可で、Mutex 保護されたキューへ積む。
 	 * ベースの設定値は書き換えず、有効な間だけ各ボーンの実効値へ倍率を乗算するため、期間終了後は常に元の挙動へ戻る。
 	 * BP再コンパイルやノード再初期化で失われる。
-	 * Request a temporary multiplier override for the physics settings. Callable from any thread; it is queued under a mutex.
+	 * Request a temporary multiplier for the physics settings. Callable from any thread; it is queued under a mutex.
 	 * The base settings are never rewritten: the multipliers are applied to each bone's effective values only while the
-	 * override is alive, so the original behavior always comes back once it ends.
+	 * multiplier is alive, so the original behavior always comes back once it ends.
 	 * Lost on BP recompile or node re-init.
 	 */
-	int64 RequestPhysicsSettingsOverride(const FKawaiiPhysicsSettingsScale& InScale, float RiseTime, float HoldTime,
-	                                     float DecayTime, int64 InHandleId = 0);
+	int64 RequestStartPhysicsSettingsMultiplier(const FKawaiiPhysicsSettingsMultiplier& InScale, float RiseTime, float HoldTime,
+	                                     float DecayTime, int64 InHandleId = 0, bool bInfiniteHold = false);
 
-	// 実行中またはキュー済みの物理設定オーバーライドをハンドル単位で停止する。任意スレッド可。
-	void RequestStopPhysicsSettingsOverride(int64 HandleId, float BlendOutTime);
+	// 実行中またはキュー済みの物理設定倍率をハンドル単位で停止する。任意スレッド可。
+	void RequestStopPhysicsSettingsMultiplier(int64 HandleId, float BlendOutTime);
 
 	/**
-	 * キュー済みの物理設定オーバーライドを worker で取り込み、経過時間を進めて期限切れを掃除する。
-	 * worker 専用で 1 evaluate 1 回だけ、UpdatePhysicsSettingsOfModifyBones の前に呼ぶ。
-	 * Consume queued physics settings overrides on the worker, advance their elapsed time and sweep expired entries.
-	 * Worker-only; call once per evaluate, before UpdatePhysicsSettingsOfModifyBones.
-	 * @return アクティブなオーバーライドが1件以上あるか / whether at least one override is active
+	 * 外部駆動の物理設定倍率を設定する。任意スレッド可で、Mutex 保護されたキューへ積む。
+	 * 呼び出し側が同じハンドルで Alpha を押し込み続ける用途向けで、内部時間では終了せず Stop またはリース失効でフェードする。
+	 * HandleId=0 またはキュー無効時は false。Alpha は 0..1 にクランプされ、同一ハンドルの未評価 Push は最新値へ集約される。
+	 * Request an externally driven multiplier for the physics settings. Callable from any thread; it is queued under a mutex.
+	 * Intended for callers that keep pushing Alpha with the same handle. It does not end by internal time and fades only by Stop or lease expiration.
+	 * Returns false for HandleId=0 or an invalid queue. Alpha is clamped to 0..1, and pending pushes with the same handle are coalesced to the latest value.
 	 */
-	bool ConsumeAndAdvancePhysicsSettingsOverrides(float InFrameDeltaTime);
+	bool RequestPushPhysicsSettingsMultiplier(const FKawaiiPhysicsSettingsMultiplier& InScale, float InAlpha, int64 InHandleId,
+	                                       int32 LeaseEvaluations = 0, float LeaseExpireBlendOutTime = 0.2f);
+
+	/**
+	 * キュー済みの物理設定倍率を worker で取り込み、経過時間を進めて期限切れを掃除する。
+	 * worker 専用で 1 evaluate 1 回だけ、UpdatePhysicsSettingsOfModifyBones の前に呼ぶ。
+	 * Consume queued physics settings multipliers on the worker, advance their elapsed time and sweep expired entries.
+	 * Worker-only; call once per evaluate, before UpdatePhysicsSettingsOfModifyBones.
+	 * @return アクティブな倍率が1件以上あるか / whether at least one multiplier is active
+	 */
+	bool ConsumeAndAdvancePhysicsSettingsMultipliers(float InFrameDeltaTime);
 
 	// UpdatePhysicsSettingsOfModifyBones を走らせるべきかの判定（EvaluateSkeletalControl_AnyThread とテストハーネスで共有）
-	bool ShouldUpdatePhysicsSettings(const bool bHasActiveSettingsOverride) const
+	bool ShouldUpdatePhysicsSettings(const bool bHasActiveSettingsMultiplier) const
 	{
-		// bUpdatePhysicsSettingsInGame が無効でも、オーバーライドの有効中と終了直後の1回は更新してベース値へ戻す
+		// bUpdatePhysicsSettingsInGame が無効でも、倍率の有効中と終了直後の1回は更新してベース値へ戻す
 		return !bInitPhysicsSettings || bUpdatePhysicsSettingsInGame ||
-			bHasActiveSettingsOverride || bPhysicsSettingsOverrideAppliedLastUpdate;
+			bHasActiveSettingsMultiplier || bPhysicsSettingsMultiplierAppliedLastUpdate;
 	}
 
 	/**
@@ -760,6 +798,71 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	TArray<FName> IgnoreBoneNamePrefix;
 
 	/**
+	* GameThreadで定期収集したレベル上のsimple collisionをトレースなしで適用します。World Collisionより大幅に低負荷ですが、薄い壁・高速移動では World Collision(sweep) の併用を推奨します。
+	* Applies level simple collision gathered periodically on the GameThread without traces. Much cheaper than World Collision, but using it with World Collision (sweep) is recommended for thin walls or fast movement.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, DisplayName = "Use Simple World Collision"))
+	bool bUseSimpleWorldCollision = false;
+
+	/**
+	* シンプルワールドコリジョンの収集間隔（秒）。0の場合は毎フレーム収集します。収集済みコンポーネントの位置更新は毎フレーム行われます。
+	* Gather interval for Simple World Collision in seconds. 0 gathers every frame. Already gathered component transforms are updated every frame.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", ClampMin = "0.0", ClampMax = "10.0",
+		DisplayName = "Gather Interval"))
+	float SimpleWorldCollisionGatherInterval = 0.2f;
+
+	/**
+	* シンプルワールドコリジョンが反応するオブジェクトタイプ。空の場合は WorldStatic + WorldDynamic を使用します。
+	* Object types used by Simple World Collision. Empty means WorldStatic + WorldDynamic.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Object Types"))
+	TArray<TEnumAsByte<EObjectTypeQuery>> SimpleWorldCollisionObjectTypes;
+
+	/**
+	* シンプルワールドコリジョンで複雑形状を近似する方法
+	* How Simple World Collision approximates complex shapes
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Complex Shape Approximation"))
+	EKawaiiPhysicsComplexShapeApproximation SimpleWorldCollisionComplexShapeApproximation =
+		EKawaiiPhysicsComplexShapeApproximation::BoxBounds;
+
+	/** シンプルワールドコリジョンの収集半径を上書きする / Override the Simple World Collision gather radius */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, InlineEditConditionToggle))
+	bool bOverrideSimpleWorldCollisionGatherRadius = false;
+
+	/**
+	* シンプルワールドコリジョンの収集半径のオーバーライド。無効時は SkeletalMesh の Bounds から自動算出します。
+	* Override for the Simple World Collision gather radius. When disabled, it is calculated automatically from SkeletalMesh bounds.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, EditCondition = "bOverrideSimpleWorldCollisionGatherRadius", ClampMin = "0",
+		DisplayName = "Gather Radius"))
+	float SimpleWorldCollisionGatherRadius = 200.0f;
+
+	/**
+	* 下方向トレース1本で地面を有界の薄いBoxとして近似します。Landscape/Complex 形状の床に対応します。
+	* Approximate the ground as a bounded thin box using one downward trace. Supports Landscape and complex-shape floors.
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Approximate Ground"))
+	bool bSimpleWorldCollisionApproximateGround = true;
+
+	/**
+	* シンプルワールドコリジョンで収集した SkeletalMeshComponent の扱い
+	* How collected SkeletalMeshComponents are handled by Simple World Collision
+	*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Skeletal Mesh Mode"))
+	EKawaiiPhysicsSimpleWorldSkeletalMeshMode SimpleWorldCollisionSkeletalMeshMode =
+		EKawaiiPhysicsSimpleWorldSkeletalMeshMode::Ignore;
+
+	/**
 	* ExternalForceなどで使用するフィルタリング用タグ
 	* Tag for filtering of ExternalForce etc
 	*/
@@ -777,6 +880,8 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	float DeltaTime = 0.0f;
 
 private:
+	void ResetTransientRuntimeState();
+
 	/**
 	* コリジョン球がボーン間の隙間を埋めるのに必要なダミーボーン数（半径ベースの被覆数）を計算。
 	* Calculates how many inter-bone dummy bones are needed so collision spheres cover the gap (radius-based coverage count).
@@ -828,11 +933,11 @@ private:
 	bool bInitPhysicsSettings = false;
 
 	/**
-	 * 前回の更新で倍率オーバーライドが適用されていたか。終了直後にもう1回だけ更新を走らせ、ベース値へ確実に戻すために使う
-	 * Whether a scale override was applied on the previous update. Used to run one more update right after it ends so the
+	 * 前回の更新で倍率が適用されていたか。終了直後にもう1回だけ更新を走らせ、ベース値へ確実に戻すために使う
+	 * Whether a scale multiplier was applied on the previous update. Used to run one more update right after it ends so the
 	 * base values are guaranteed to be restored.
 	 */
-	bool bPhysicsSettingsOverrideAppliedLastUpdate = false;
+	bool bPhysicsSettingsMultiplierAppliedLastUpdate = false;
 
 	/**
 	 * Transform of the skeletal component in last frame.
@@ -917,6 +1022,24 @@ private:
 	// Scratch for Publish (swap-based, reuses capacity across frames to avoid per-frame allocation on the source)
 	FKawaiiPhysicsSharedCollisionData SharedCollisionPublishScratch;
 
+	// --- Simple World Collision ---
+	// GameThread(OnInitializeAnimInstance)で解決したSkelCompキー。WorkerではdereferenceせずSubsystemキーとしてのみ使う
+	// SkelComp key resolved on the GameThread; worker uses it only as a subsystem key and does not dereference it
+	TWeakObjectPtr<const USkeletalMeshComponent> CachedSimpleWorldCollisionSkelComp;
+	TSharedPtr<FKawaiiPhysicsSimpleWorldCollisionEntry> CachedSimpleWorldEntry;
+	FKawaiiPhysicsSimpleWorldCollisionDesc LastSentSimpleWorldDesc;
+	bool bSimpleWorldDescSent = false;
+	bool bSimpleWorldCollisionInitialized = false;
+	bool bSimpleWorldRadiusWarningLogged = false;
+	FKawaiiPhysicsSharedCollisionData SimpleWorldMergedScratch;
+
+	// シンプルワールドコリジョンワーク配列（シミュレーション空間に変換済み）
+	// Simple world collision working arrays (converted to simulation space)
+	TArray<FSphericalLimit> SimpleWorldSphericalLimits;
+	TArray<FCapsuleLimit> SimpleWorldCapsuleLimits;
+	TArray<FTaperedCapsuleLimit> SimpleWorldTaperedCapsuleLimits;
+	TArray<FBoxLimit> SimpleWorldBoxLimits;
+
 	// 風の乱数(gust/cone)をフレーム単位でキャッシュしサブステップ間で同一値を使う（NumStep非依存＝フレームレート非依存）
 	// Cache wind randomness (gust/cone) per frame, shared across substeps (frame-rate independent)
 	mutable uint64 CachedWindNoiseFrame = 0;
@@ -930,6 +1053,10 @@ private:
 	TArray<FName> IgnoreBoneNamePrefixCache;
 	// sweep結果を受け取る使い回しバッファ（フレーム間で確保済みメモリを再利用） / Sweep-result scratch (reuses capacity across frames)
 	TArray<FHitResult> WorldCollisionHitsScratch;
+	// World Collision クエリ設定のホイスト済みキャッシュ（SimulateModifyBones冒頭で構築、サブステップ×ボーン間で再利用） / Hoisted world-collision query setup (built at the start of SimulateModifyBones, reused across substeps and bones)
+	FCollisionQueryParams WorldCollisionQueryParamsCache;
+	ECollisionChannel WorldCollisionTraceChannelCache = ECC_WorldStatic;
+	FCollisionResponseParams WorldCollisionResponseParamsCache;
 
 	// bridge dummy feedback の集計用使い回しバッファ（端点index→押し出し/重み）。SimulateOnce毎のTMap確保を避け、
 	// フレーム間で確保済みメモリを再利用する。 / Bridge-dummy feedback accumulation scratch (endpoint index -> push/weight);
@@ -1238,11 +1365,11 @@ protected:
 	void UpdatePhysicsSettingsOfModifyBones();
 
 	/**
-	 * 実行中の全オーバーライドを合成した実効倍率を返す。成分ごとに Lerp(1.0, Scale, α) の積で、α はボーンに依存しない
-	 * Returns the effective multipliers of every active override combined: per component, the product of Lerp(1.0, Scale, α).
+	 * 実行中の全倍率を合成した実効倍率を返す。成分ごとに Lerp(1.0, Scale, α) の積で、α はボーンに依存しない
+	 * Returns the effective multipliers of every active multiplier combined: per component, the product of Lerp(1.0, Scale, α).
 	 * α does not depend on the bone.
 	 */
-	FKawaiiPhysicsSettingsScale ComputeEffectivePhysicsSettingsOverrideScale() const;
+	FKawaiiPhysicsSettingsMultiplier ComputeEffectivePhysicsSettingsMultiplierScale() const;
 
 	/**
 	 * Updates the spherical limits for the given bones.
@@ -1296,7 +1423,7 @@ protected:
 	 * @param BoneContainer The bone container.
 	 * @param ComponentTransform The component transform.
 	 */
-	void UpdatePlanerLimits(TArray<FPlanarLimit>& Limits, FComponentSpacePoseContext& Output,
+	void UpdatePlanarLimits(TArray<FPlanarLimit>& Limits, FComponentSpacePoseContext& Output,
 	                        const FBoneContainer& BoneContainer, const FTransform& ComponentTransform) const;
 
 	/**
@@ -1323,6 +1450,30 @@ protected:
 	 * Read shared collision and convert to simulation space (any thread)
 	 */
 	void UpdateSharedCollisionLimits(FComponentSpacePoseContext& Output);
+
+	/**
+	 * シンプルワールドコリジョンのEntryを初期化する（AnyThread）
+	 * Initialize the Simple World Collision entry (any thread)
+	 */
+	void InitializeSimpleWorldCollision();
+
+	/**
+	 * 現在の設定からシンプルワールドコリジョンのDescを構築する（AnyThread、UObjectをdereferenceしない）
+	 * Build the Simple World Collision Desc from current settings (any thread; does not dereference UObject)
+	 */
+	FKawaiiPhysicsSimpleWorldCollisionDesc BuildSimpleWorldCollisionDesc() const;
+
+	/**
+	 * シンプルワールドコリジョンを読み取り、シミュレーション空間に変換する（AnyThread）
+	 * Read Simple World Collision and convert to simulation space (any thread)
+	 */
+	void UpdateSimpleWorldCollisionLimits(FComponentSpacePoseContext& Output);
+
+	/**
+	 * シンプルワールドコリジョンのDesc登録を解除する（AnyThread）
+	 * Remove this node's Simple World Collision desc (any thread)
+	 */
+	void ReleaseSimpleWorldCollision();
 
 	/**
 	 * Updates the pose transform for all modified bones.
@@ -1407,6 +1558,9 @@ protected:
 	friend struct FKawaiiPhysicsTestAccessor;
 #endif
 
+	// World Collision クエリ設定のキャッシュを構築（SimulateModifyBones冒頭で毎フレーム1回） / Build hoisted world-collision query caches (once per frame at the start of SimulateModifyBones)
+	void PrepareWorldCollisionQueryCaches(const USkeletalMeshComponent* OwningComp);
+
 	/**
 	 * Adjusts the bone position based on world collision.
 	 *
@@ -1463,7 +1617,7 @@ protected:
 	 * @param Bone The bone to adjust.
 	 * @param Limits An array of planar limits.
 	 */
-	void AdjustByPlanerCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FPlanarLimit>& Limits);
+	void AdjustByPlanarCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FPlanarLimit>& Limits);
 
 	/**
 	 * Adjusts the bone position based on angle limits.

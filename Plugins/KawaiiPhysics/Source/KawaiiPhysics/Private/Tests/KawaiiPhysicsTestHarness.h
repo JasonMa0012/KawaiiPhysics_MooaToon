@@ -14,7 +14,8 @@
  *
  * FAnimNode_KawaiiPhysics の friend として private/protected の sim 状態・物理計算・コリジョン関数へアクセスし、Output 無しで物理コアをヘッドレス実行する。
  *
- * StepOnce()/StepFrame() は SimulateOnce()/SimulateModifyBones() の Output 非依存部分を単純な縦チェーン用に複製する（数式は本番と同一関数を呼ぶので数式リグレッションを検出でき、複製は呼び出し順序のみ＝本番と二重管理。ダミー/ブリッジ/LOD/外力/world collision/BaseBoneSpace は非対応）。
+ * StepOnce()/StepFrame() は SimulateOnce()/SimulateModifyBones() の Output 非依存部分を単純な縦チェーン用に複製する（数式は本番と同一関数を呼ぶので数式リグレッションを検出でき、複製は呼び出し順序のみ＝本番と二重管理。ダミー/ブリッジ/LOD/外力/world collision(Output依存のsweep)/BaseBoneSpace は非対応。
+ * simple world collision は SetSimpleWorldLimits() による配列への手動注入なら対応（Subsystemによる収集自体は対象外））。
  */
 struct FKawaiiPhysicsTestAccessor
 {
@@ -160,6 +161,20 @@ struct FKawaiiPhysicsTestAccessor
 	{
 		Node.SkelCompMoveVector = MoveVec;
 		Node.SkelCompMoveRotation = MoveRot;
+	}
+
+	/**
+	 * SimpleWorld コリジョン配列（Subsystem が本来収集する4形状）を直接注入し、bUseSimpleWorldCollision も true にする。
+	 * Injects the SimpleWorld collision arrays (the four shapes the Subsystem normally gathers) directly and enables bUseSimpleWorldCollision.
+	 */
+	void SetSimpleWorldLimits(const TArray<FSphericalLimit>& Spherical, const TArray<FCapsuleLimit>& Capsule,
+	                          const TArray<FTaperedCapsuleLimit>& TaperedCapsule, const TArray<FBoxLimit>& Box)
+	{
+		Node.SimpleWorldSphericalLimits = Spherical;
+		Node.SimpleWorldCapsuleLimits = Capsule;
+		Node.SimpleWorldTaperedCapsuleLimits = TaperedCapsule;
+		Node.SimpleWorldBoxLimits = Box;
+		Node.bUseSimpleWorldCollision = true;
 	}
 
 	/** 固定サブステッピング設定（DeveloperSettings の代わりに直接指定） */
@@ -331,7 +346,7 @@ struct FKawaiiPhysicsTestAccessor
 		{
 			Limit.UpdateRuntimeCache();
 		}
-		Node.AdjustByPlanerCollision(Bone, Limits);
+		Node.AdjustByPlanarCollision(Bone, Limits);
 	}
 	void CallAngleLimit(FKawaiiPhysicsModifyBone& Bone, const FKawaiiPhysicsModifyBone& ParentBone)
 	{
@@ -368,13 +383,19 @@ struct FKawaiiPhysicsTestAccessor
 		Node.UpdatePhysicsSettingsOfModifyBones();
 	}
 
-	FKawaiiPhysicsSettingsScale CallComputeEffectiveSettingsOverrideScale() const
+	void CallResetTransientRuntimeState()
 	{
-		return Node.ComputeEffectivePhysicsSettingsOverrideScale();
+		Node.ResetTransientRuntimeState();
+	}
+
+	FKawaiiPhysicsSettingsMultiplier CallComputeEffectiveSettingsMultiplierScale() const
+	{
+		return Node.ComputeEffectivePhysicsSettingsMultiplierScale();
 	}
 
 	void SetInitPhysicsSettings(bool bInit) { Node.bInitPhysicsSettings = bInit; }
-	bool IsPhysicsSettingsOverrideAppliedLastUpdate() const { return Node.bPhysicsSettingsOverrideAppliedLastUpdate; }
+	bool IsPhysicsSettingsMultiplierAppliedLastUpdate() const { return Node.bPhysicsSettingsMultiplierAppliedLastUpdate; }
+	void SetPhysicsSettingsMultiplierAppliedLastUpdate(const bool bValue) { Node.bPhysicsSettingsMultiplierAppliedLastUpdate = bValue; }
 
 	/**
 	 * EvaluateSkeletalControl_AnyThread の物理設定更新 gating（判定は ShouldUpdatePhysicsSettings を共有）を Output 無しで実行する
@@ -383,11 +404,11 @@ struct FKawaiiPhysicsTestAccessor
 	 */
 	bool RunPhysicsSettingsUpdateGate(float FrameDt)
 	{
-		const bool bHasActiveSettingsOverride = Node.ConsumeAndAdvancePhysicsSettingsOverrides(FrameDt);
-		if (Node.ShouldUpdatePhysicsSettings(bHasActiveSettingsOverride))
+		const bool bHasActiveSettingsMultiplier = Node.ConsumeAndAdvancePhysicsSettingsMultipliers(FrameDt);
+		if (Node.ShouldUpdatePhysicsSettings(bHasActiveSettingsMultiplier))
 		{
 			Node.UpdatePhysicsSettingsOfModifyBones();
-			Node.bPhysicsSettingsOverrideAppliedLastUpdate = bHasActiveSettingsOverride;
+			Node.bPhysicsSettingsMultiplierAppliedLastUpdate = bHasActiveSettingsMultiplier;
 			Node.bInitPhysicsSettings = true;
 			return true;
 		}
@@ -570,8 +591,17 @@ private:
 			Node.AdjustByTaperedCapsuleCollision(Bone, Node.TaperedCapsuleLimitsData);
 			Node.AdjustByBoxCollision(Bone, Node.BoxLimits);
 			Node.AdjustByBoxCollision(Bone, Node.BoxLimitsData);
-			Node.AdjustByPlanerCollision(Bone, Node.PlanarLimits);
-			Node.AdjustByPlanerCollision(Bone, Node.PlanarLimitsData);
+			Node.AdjustByPlanarCollision(Bone, Node.PlanarLimits);
+			Node.AdjustByPlanarCollision(Bone, Node.PlanarLimitsData);
+
+			// シンプルワールドコリジョン（本体 Simulation.cpp と同じ条件・同じ位置＝Sharedの後・WorldCollisionの前に相当）
+			if (Node.bUseSimpleWorldCollision)
+			{
+				Node.AdjustBySphereCollision(Bone, Node.SimpleWorldSphericalLimits);
+				Node.AdjustByCapsuleCollision(Bone, Node.SimpleWorldCapsuleLimits);
+				Node.AdjustByTaperedCapsuleCollision(Bone, Node.SimpleWorldTaperedCapsuleLimits);
+				Node.AdjustByBoxCollision(Bone, Node.SimpleWorldBoxLimits);
+			}
 		}
 
 		// BoneConstraint after collision（SimulateOnce 516-522）

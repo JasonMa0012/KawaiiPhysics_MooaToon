@@ -5,22 +5,23 @@
 #include "CoreGlobals.h"
 #include "EditorModeRegistry.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Framework/Docking/TabManager.h"
-#include "Framework/Docking/WorkspaceItem.h"
 #include "KawaiiPhysicsEdStyle.h"
+#include "KawaiiPhysicsEditorTabFactories.h"
 #include "KawaiiPhysicsEditMode.h"
 #include "KawaiiPhysicsPresetDataAssetDetails.h"
+#include "ISequencerModule.h"
 #include "Misc/App.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/EngineVersionComparison.h"
 #include "Modules/ModuleManager.h"
+#include "PersonaModule.h"
 #include "PropertyEditorModule.h"
+#include "Sequencer/KawaiiPhysicsSettingsMultiplierTrackEditor.h"
 #include "SKawaiiPhysicsNodeAuditWindow.h"
 #include "SKawaiiPhysicsPresetDiffWindow.h"
 #include "SKawaiiPhysicsWindScopeWindow.h"
-#include "Textures/SlateIcon.h"
-#include "WorkspaceMenuStructure.h"
-#include "WorkspaceMenuStructureModule.h"
+#include "Toolkits/AssetEditorToolkit.h"
+#include "WorkflowOrientedApp/WorkflowTabManager.h"
 
 #define LOCTEXT_NAMESPACE "FKawaiiPhysicsModuleEd"
 
@@ -51,6 +52,10 @@ void FKawaiiPhysicsEdModule::StartupModule()
 
 	if (GIsEditor && !IsRunningCommandlet())
 	{
+		ISequencerModule& SequencerModule = FModuleManager::LoadModuleChecked<ISequencerModule>("Sequencer");
+		SequencerTrackEditorHandle = SequencerModule.RegisterTrackEditor(
+			FOnCreateTrackEditor::CreateStatic(&FKawaiiPhysicsSettingsMultiplierTrackEditor::CreateTrackEditor));
+
 		if (FSlateApplication::IsInitialized())
 		{
 			RegisterTabSpawners();
@@ -79,18 +84,25 @@ void FKawaiiPhysicsEdModule::ShutdownModule()
 
 	if (bTabSpawnersRegistered)
 	{
-		SKawaiiPhysicsWindScopeWindow::UnregisterTabSpawner();
-		SKawaiiPhysicsPresetDiffWindow::UnregisterTabSpawner();
-		SKawaiiPhysicsNodeAuditWindow::UnregisterTabSpawner();
-
-		if (KawaiiPhysicsMenuGroup.IsValid())
+		if (FPersonaModule* PersonaModule = FModuleManager::GetModulePtr<FPersonaModule>("Persona"))
 		{
-			WorkspaceMenu::GetMenuStructure().GetStructureRoot()->RemoveItem(KawaiiPhysicsMenuGroup.ToSharedRef());
-			KawaiiPhysicsMenuGroup.Reset();
+			PersonaModule->OnRegisterTabs().Remove(PersonaRegisterTabsHandle);
 		}
+		PersonaRegisterTabsHandle.Reset();
+
+		SKawaiiPhysicsNodeAuditWindow::UnregisterTabSpawner();
 
 		FKawaiiPhysicsEdStyle::Shutdown();
 		bTabSpawnersRegistered = false;
+	}
+
+	if (SequencerTrackEditorHandle.IsValid())
+	{
+		if (ISequencerModule* SequencerModule = FModuleManager::GetModulePtr<ISequencerModule>("Sequencer"))
+		{
+			SequencerModule->UnRegisterTrackEditor(SequencerTrackEditorHandle);
+		}
+		SequencerTrackEditorHandle.Reset();
 	}
 
 	if (FPropertyEditorModule* PropertyEditorModule = FModuleManager::GetModulePtr<FPropertyEditorModule>(
@@ -112,18 +124,30 @@ void FKawaiiPhysicsEdModule::RegisterTabSpawners()
 
 	FKawaiiPhysicsEdStyle::Initialize();
 
-	const FSlateIcon KawaiiPhysicsIcon(
-		FKawaiiPhysicsEdStyle::GetStyleSetName(),
-		TEXT("KawaiiPhysics.TabIcon"));
-	KawaiiPhysicsMenuGroup = WorkspaceMenu::GetMenuStructure().GetStructureRoot()->AddGroup(
-		LOCTEXT("KawaiiPhysicsMenuGroup", "Kawaii Physics"),
-		KawaiiPhysicsIcon,
-		false);
+	// ABP エディタごとの Window メニューへ WorkflowTabFactory 経由で登録する
+	FPersonaModule& PersonaModule = FModuleManager::LoadModuleChecked<FPersonaModule>("Persona");
+	PersonaRegisterTabsHandle = PersonaModule.OnRegisterTabs().AddRaw(
+		this,
+		&FKawaiiPhysicsEdModule::HandleRegisterPersonaTabs);
 
-	SKawaiiPhysicsWindScopeWindow::RegisterTabSpawner(KawaiiPhysicsMenuGroup.ToSharedRef());
-	SKawaiiPhysicsPresetDiffWindow::RegisterTabSpawner(KawaiiPhysicsMenuGroup.ToSharedRef());
-	SKawaiiPhysicsNodeAuditWindow::RegisterTabSpawner(KawaiiPhysicsMenuGroup.ToSharedRef());
+	// プリセット DataAsset 詳細から開くため、Node Audit だけはグローバルの Hidden Nomad タブを残す
+	SKawaiiPhysicsNodeAuditWindow::RegisterTabSpawner();
+
 	bTabSpawnersRegistered = true;
+}
+
+void FKawaiiPhysicsEdModule::HandleRegisterPersonaTabs(
+	FWorkflowAllowedTabSet& TabSet,
+	TSharedPtr<FAssetEditorToolkit> InHostingApp)
+{
+	if (!InHostingApp.IsValid() || InHostingApp->GetToolkitFName() != FName(TEXT("AnimationBlueprintEditor")))
+	{
+		return;
+	}
+
+	TabSet.RegisterFactory(MakeShared<FKawaiiPhysicsWindScopeTabFactory>(InHostingApp));
+	TabSet.RegisterFactory(MakeShared<FKawaiiPhysicsPresetDiffTabFactory>(InHostingApp));
+	TabSet.RegisterFactory(MakeShared<FKawaiiPhysicsNodeAuditTabFactory>(InHostingApp));
 }
 
 #undef LOCTEXT_NAMESPACE

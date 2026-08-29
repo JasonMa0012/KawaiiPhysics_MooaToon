@@ -105,7 +105,7 @@ namespace KawaiiPhysicsPresetDiff
 		const FKawaiiPhysicsPresetApplyOptions& Options)
 	{
 		TArray<TStrongObjectPtr<UKawaiiPhysicsPresetDataAsset>> Presets;
-		UKawaiiPhysicsEditorLibrary::GetAllPresetAssets(Presets);
+		UKawaiiPhysicsEditorLibrary::FindAllPresetAssetData(Presets);
 
 		TArray<TSharedRef<FKawaiiPhysicsPresetDiffSnapshot>> Snapshots;
 		for (const TStrongObjectPtr<UKawaiiPhysicsPresetDataAsset>& PresetPtr : Presets)
@@ -119,7 +119,7 @@ namespace KawaiiPhysicsPresetDiff
 		return Snapshots;
 	}
 
-	FString SnapshotToClipboardText(const FKawaiiPhysicsPresetDiffSnapshot& Snapshot, const FText& ContextLabel)
+	FString MakeClipboardTextFromSnapshot(const FKawaiiPhysicsPresetDiffSnapshot& Snapshot, const FText& ContextLabel)
 	{
 		TArray<FString> Lines;
 		Lines.Add(TEXT("Context\tPreset\tPresetPath\tPropertyName\tDisplayName\tCategory\tNodeValue\tPresetValue"));
