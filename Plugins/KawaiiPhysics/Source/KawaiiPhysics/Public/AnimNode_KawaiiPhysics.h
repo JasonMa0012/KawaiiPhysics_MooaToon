@@ -171,7 +171,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* 0より大きい場合は、制御ボーンの末端にダミーボーンを追加。ダミーボーンを追加することで、末端のボーンの物理制御を改善
 	* Add a dummy bone to the end bone if it's above 0. It affects end bone rotation. 
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones", meta = (PinHiddenByDefault, ClampMin = "0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bones", meta = (PinHiddenByDefault, ClampMin = "0", Units = "cm"))
 	float DummyBoneLength = 0.0f;
 
 	/**
@@ -286,14 +286,14 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	* 1フレームにおけるSkeletalMeshComponentの移動量が設定値を超えた場合、その移動量を物理制御に反映しない
 	* If the amount of movement of a SkeletalMeshComponent in one frame exceeds the set value, that amount of movement will not be reflected in the physics control.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", meta = (PinHiddenByDefault, Units = "cm"))
 	float TeleportDistanceThreshold = 300.0f;
 
 	/** 
 	* 1フレームにおけるSkeletalMeshComponentの回転量が設定値を超えた場合、その回転量を物理制御に反映しない
 	* If the rotation amount of SkeletalMeshComponent in one frame exceeds the set value, the rotation amount will not be reflected in the physics control.
 	*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", meta = (PinHiddenByDefault))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Physics Settings", meta = (PinHiddenByDefault, Units = "Degrees"))
 	float TeleportRotationThreshold = 10.0f;
 
 	/** 
@@ -811,7 +811,7 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", ClampMin = "0.0", ClampMax = "10.0",
-		DisplayName = "Gather Interval"))
+		DisplayName = "Gather Interval", Units = "s"))
 	float SimpleWorldCollisionGatherInterval = 0.2f;
 
 	/**
@@ -823,13 +823,13 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	TArray<TEnumAsByte<EObjectTypeQuery>> SimpleWorldCollisionObjectTypes;
 
 	/**
-	* シンプルワールドコリジョンで複雑形状を近似する方法
-	* How Simple World Collision approximates complex shapes
+	* Simple World Collision で Convex コリジョンの代わりに使う形状。Convex は直接扱えないため、境界ボックス / 境界球で代用するか None で無視します。
+	* Shape used in place of convex collision in Simple World Collision. Convex collision is not supported directly, so substitute its bounding box / bounding sphere, or skip it with None.
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
-		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Complex Shape Approximation"))
-	EKawaiiPhysicsComplexShapeApproximation SimpleWorldCollisionComplexShapeApproximation =
-		EKawaiiPhysicsComplexShapeApproximation::BoxBounds;
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Convex Fallback Shape"))
+	EKawaiiPhysicsSimpleWorldConvexFallbackShape SimpleWorldCollisionConvexFallbackShape =
+		EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox;
 
 	/** シンプルワールドコリジョンの収集半径を上書きする / Override the Simple World Collision gather radius */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
@@ -842,25 +842,25 @@ struct KAWAIIPHYSICS_API FAnimNode_KawaiiPhysics : public FAnimNode_SkeletalCont
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
 		meta = (PinHiddenByDefault, EditCondition = "bOverrideSimpleWorldCollisionGatherRadius", ClampMin = "0",
-		DisplayName = "Gather Radius"))
+		DisplayName = "Gather Radius", Units = "cm"))
 	float SimpleWorldCollisionGatherRadius = 200.0f;
 
 	/**
-	* 下方向トレース1本で地面を有界の薄いBoxとして近似します。Landscape/Complex 形状の床に対応します。
-	* Approximate the ground as a bounded thin box using one downward trace. Supports Landscape and complex-shape floors.
+	* 所有 Actor の地面情報（IKawaiiPhysicsGroundProvider → CharacterMovementComponent の CurrentFloor）があればそれを使い、無ければ下方向トレース 1 本で地面を求め、薄い Box コリジョンとして扱います。Landscape や Complex コリジョンのみの床でも有効です。
+	* Uses the owner's ground info when available (IKawaiiPhysicsGroundProvider, then CharacterMovementComponent CurrentFloor); otherwise fires one downward trace. The ground is treated as a thin box collision. Works on Landscape and complex-collision-only floors.
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
-		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Approximate Ground"))
-	bool bSimpleWorldCollisionApproximateGround = true;
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Ground Collision"))
+	bool bSimpleWorldCollisionGroundCollision = true;
 
 	/**
-	* シンプルワールドコリジョンで収集した SkeletalMeshComponent の扱い
-	* How collected SkeletalMeshComponents are handled by Simple World Collision
+	* Simple World Collision で収集した周囲の SkeletalMeshComponent との当たり方。None / Bounding Box / Physics Asset から選びます。
+	* How Simple World Collision collides with gathered SkeletalMeshComponents: None, Bounding Box, or Physics Asset.
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Collision|Simple World Collision",
-		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Skeletal Mesh Mode"))
-	EKawaiiPhysicsSimpleWorldSkeletalMeshMode SimpleWorldCollisionSkeletalMeshMode =
-		EKawaiiPhysicsSimpleWorldSkeletalMeshMode::Ignore;
+		meta = (PinHiddenByDefault, EditCondition = "bUseSimpleWorldCollision", DisplayName = "Skeletal Mesh Collision"))
+	EKawaiiPhysicsSimpleWorldSkeletalMeshCollision SimpleWorldCollisionSkeletalMeshCollision =
+		EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::None;
 
 	/**
 	* ExternalForceなどで使用するフィルタリング用タグ
@@ -1160,6 +1160,18 @@ public:
 	float GetStepDeltaTime() const
 	{
 		return bInSubstep ? StepDeltaTime : DeltaTime;
+	}
+
+	/**
+	 * 現在読み込んでいるシンプルワールドコリジョン形状数を返す。
+	 * Returns the number of Simple World Collision shapes currently read by this node.
+	 */
+	int32 GetNumSimpleWorldColliders() const
+	{
+		return SimpleWorldSphericalLimits.Num()
+			+ SimpleWorldCapsuleLimits.Num()
+			+ SimpleWorldTaperedCapsuleLimits.Num()
+			+ SimpleWorldBoxLimits.Num();
 	}
 
 	/**

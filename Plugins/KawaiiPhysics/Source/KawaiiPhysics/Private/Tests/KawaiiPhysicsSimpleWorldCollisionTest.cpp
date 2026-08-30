@@ -6,6 +6,7 @@
 #include "KawaiiPhysicsTestHarness.h"
 #include "KawaiiPhysicsSimpleWorldCollision.h"
 #include "KawaiiPhysicsSharedCollisionSubsystem.h"
+#include "Components/StaticMeshComponent.h"
 #include "Misc/EngineVersionComparison.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 
@@ -13,6 +14,9 @@
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #endif
 #include "ReferenceSkeleton.h"
+#include "UObject/Package.h"
+
+#include <limits>
 
 // シンプルワールドコリジョン（KawaiiPhysicsSimpleWorldCollision namespace / SharedCollisionSubsystem の関連構造体）の単体テスト。
 // AggGeom→Limit変換、ローカル→ワールド変換、フェード、Desc Merge、Entryのライフサイクル、ハーネス経由のpush-out統合を検証する。
@@ -21,6 +25,105 @@ namespace
 {
 	constexpr float GSimpleWorldTol = 0.001f;
 	constexpr float GSimpleWorldPushOutTol = 0.01f; // 0.1mm スケール（他コリジョンテストと同じ粒度）
+}
+
+// ---------------------------------------------------------------------------
+//  BuildGroundBox
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKawaiiPhysicsSimpleWorldBuildGroundBoxTest,
+                                 "KawaiiPhysics.SimpleWorld.BuildGroundBox",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKawaiiPhysicsSimpleWorldBuildGroundBoxTest::RunTest(const FString& Parameters)
+{
+	using KawaiiPhysicsSimpleWorldCollision::GroundBoxHalfThickness;
+
+	const FVector ImpactPoint(100.0f, 200.0f, 50.0f);
+
+	{
+		FBoxLimit OutBox;
+		const bool bBuilt = KawaiiPhysicsSimpleWorldCollision::BuildSimpleWorldGroundBox(
+			ImpactPoint, FVector::UpVector, 300.0f, OutBox);
+
+		TestTrue(TEXT("Up normal builds a ground box"), bBuilt);
+		TestTrue(TEXT("Up normal location offsets by half thickness"),
+		         OutBox.Location.Equals(FVector(100.0f, 200.0f, 40.0f), GSimpleWorldTol));
+		TestTrue(TEXT("Up normal extent uses radius and half thickness"),
+		         OutBox.Extent.Equals(FVector(300.0f, 300.0f, 10.0f), GSimpleWorldTol));
+		TestTrue(TEXT("Up normal rotation is identity"), OutBox.Rotation.Equals(FQuat::Identity, GSimpleWorldTol));
+		TestTrue(TEXT("Ground box is enabled and sourced from SimpleWorld"),
+		         OutBox.bEnable && OutBox.SourceType == ECollisionSourceType::SimpleWorld);
+	}
+
+	{
+		const FVector TiltedNormal(
+			FMath::Sin(FMath::DegreesToRadians(30.0f)),
+			0.0f,
+			FMath::Cos(FMath::DegreesToRadians(30.0f)));
+		FBoxLimit OutBox;
+		const bool bBuilt = KawaiiPhysicsSimpleWorldCollision::BuildSimpleWorldGroundBox(
+			ImpactPoint, TiltedNormal, 300.0f, OutBox);
+
+		TestTrue(TEXT("Tilted normal builds a ground box"), bBuilt);
+		TestTrue(TEXT("Tilted normal rotation up vector matches normal"),
+		         OutBox.Rotation.GetUpVector().Equals(TiltedNormal, 0.0001f));
+		TestTrue(TEXT("Tilted normal location offsets along normal"),
+		         OutBox.Location.Equals(ImpactPoint - TiltedNormal * GroundBoxHalfThickness, GSimpleWorldTol));
+	}
+
+	{
+		FBoxLimit OutBox;
+		const bool bBuilt = KawaiiPhysicsSimpleWorldCollision::BuildSimpleWorldGroundBox(
+			ImpactPoint, FVector::UpVector, 0.0f, OutBox);
+
+		TestTrue(TEXT("Zero radius builds a ground box"), bBuilt);
+		TestTrue(TEXT("Zero radius clamps XY extent to zero"),
+		         OutBox.Extent.Equals(FVector(0.0f, 0.0f, 10.0f), GSimpleWorldTol));
+		TestFalse(TEXT("Zero radius output has no NaN"), OutBox.Location.ContainsNaN() || OutBox.Extent.ContainsNaN());
+	}
+
+	{
+		FBoxLimit OutBox;
+		const bool bBuilt = KawaiiPhysicsSimpleWorldCollision::BuildSimpleWorldGroundBox(
+			ImpactPoint, FVector::ZeroVector, 300.0f, OutBox);
+
+		TestTrue(TEXT("Zero normal builds a ground box"), bBuilt);
+		TestTrue(TEXT("Zero normal falls back to up"),
+		         OutBox.Rotation.GetUpVector().Equals(FVector::UpVector, GSimpleWorldTol));
+	}
+
+	{
+		FBoxLimit SentinelBox;
+		SentinelBox.Location = FVector(1.0f, 2.0f, 3.0f);
+		SentinelBox.Rotation = FRotator(10.0f, 20.0f, 30.0f).Quaternion();
+		SentinelBox.Extent = FVector(4.0f, 5.0f, 6.0f);
+		SentinelBox.bEnable = false;
+		SentinelBox.SourceType = ECollisionSourceType::DataAsset;
+
+		FBoxLimit OutBox = SentinelBox;
+		const FVector NaNPoint(std::numeric_limits<float>::quiet_NaN(), 200.0f, 50.0f);
+		const bool bBuilt = KawaiiPhysicsSimpleWorldCollision::BuildSimpleWorldGroundBox(
+			NaNPoint, FVector::UpVector, 300.0f, OutBox);
+
+		TestFalse(TEXT("NaN impact point is rejected"), bBuilt);
+		TestTrue(TEXT("Rejected input leaves location unchanged"), OutBox.Location.Equals(SentinelBox.Location));
+		TestTrue(TEXT("Rejected input leaves rotation unchanged"), OutBox.Rotation.Equals(SentinelBox.Rotation));
+		TestTrue(TEXT("Rejected input leaves extent unchanged"), OutBox.Extent.Equals(SentinelBox.Extent));
+		TestTrue(TEXT("Rejected input leaves flags unchanged"),
+		         OutBox.bEnable == SentinelBox.bEnable && OutBox.SourceType == SentinelBox.SourceType);
+	}
+
+	{
+		FBoxLimit OutBox;
+		const bool bBuilt = KawaiiPhysicsSimpleWorldCollision::BuildSimpleWorldGroundBox(
+			ImpactPoint, FVector::UpVector, -50.0f, OutBox);
+
+		TestTrue(TEXT("Negative radius builds a ground box"), bBuilt);
+		TestTrue(TEXT("Negative radius clamps XY extent to zero"),
+		         OutBox.Extent.Equals(FVector(0.0f, 0.0f, 10.0f), GSimpleWorldTol));
+	}
+
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +169,7 @@ bool FKawaiiPhysicsSimpleWorldConvertAggGeomTest::RunTest(const FString& Paramet
 
 		FKawaiiPhysicsSharedCollisionData OutLimits;
 		KawaiiPhysicsSimpleWorldCollision::ConvertAggGeomToLocalLimits(
-			AggGeom, FVector::OneVector, EKawaiiPhysicsComplexShapeApproximation::BoxBounds, OutLimits);
+			AggGeom, FVector::OneVector, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox, OutLimits);
 
 		TestTrue(TEXT("Sphere elem maps to exactly one spherical limit"), OutLimits.SphericalLimits.Num() == 1);
 		TestTrue(TEXT("Sphyl elem maps to exactly one capsule limit"), OutLimits.CapsuleLimits.Num() == 1);
@@ -151,7 +254,7 @@ bool FKawaiiPhysicsSimpleWorldConvertAggGeomTest::RunTest(const FString& Paramet
 
 		FKawaiiPhysicsSharedCollisionData OutLimits;
 		KawaiiPhysicsSimpleWorldCollision::ConvertAggGeomToLocalLimits(
-			AggGeom, Scale, EKawaiiPhysicsComplexShapeApproximation::BoxBounds, OutLimits);
+			AggGeom, Scale, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox, OutLimits);
 
 		const FSphericalLimit& SphereLimit = OutLimits.SphericalLimits[0];
 		TestTrue(TEXT("Non-uniform scale: sphere location matches GetFinalScaled"),
@@ -187,7 +290,7 @@ bool FKawaiiPhysicsSimpleWorldConvertAggGeomTest::RunTest(const FString& Paramet
 		         FMath::IsNearlyEqual(TaperedLimit.Length, ExpectedTapered.Length, GSimpleWorldTol));
 	}
 
-	// --- Convex（ElemBox 有効・Elem Transform 付き）: BoxBounds/SphereBounds/Ignore の3分岐 ---
+	// --- Convex（ElemBox 有効・Elem Transform 付き）: BoundingBox/BoundingSphere/None の3分岐 ---
 	{
 		const FVector Scale(2.0f, 1.0f, 0.5f);
 
@@ -200,39 +303,39 @@ bool FKawaiiPhysicsSimpleWorldConvertAggGeomTest::RunTest(const FString& Paramet
 		// Extent = BoxHalfSize(4,2,1) * ScaleAbs(2,1,0.5) で算出される
 		const FVector ExpectedExtent(8.0f, 2.0f, 0.5f);
 
-		// BoxBounds近似: FBoxLimitを生成
+		// BoundingBox近似: FBoxLimitを生成
 		{
 			FKAggregateGeom AggGeom;
 			AggGeom.ConvexElems.Add(ConvexElem);
 			FKawaiiPhysicsSharedCollisionData OutLimits;
 			KawaiiPhysicsSimpleWorldCollision::ConvertAggGeomToLocalLimits(
-				AggGeom, Scale, EKawaiiPhysicsComplexShapeApproximation::BoxBounds, OutLimits);
+				AggGeom, Scale, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox, OutLimits);
 
-			TestTrue(TEXT("Convex BoxBounds: produces exactly one box limit and no sphere limit"),
+			TestTrue(TEXT("Convex BoundingBox: produces exactly one box limit and no sphere limit"),
 			         OutLimits.BoxLimits.Num() == 1 && OutLimits.SphericalLimits.Num() == 0);
-			TestTrue(TEXT("Convex BoxBounds: location"),
+			TestTrue(TEXT("Convex BoundingBox: location"),
 			         OutLimits.BoxLimits[0].Location.Equals(ExpectedLocation, GSimpleWorldTol));
-			TestTrue(TEXT("Convex BoxBounds: rotation matches elem transform"),
+			TestTrue(TEXT("Convex BoundingBox: rotation matches elem transform"),
 			         OutLimits.BoxLimits[0].Rotation.Equals(FQuat::Identity, GSimpleWorldTol));
-			TestTrue(TEXT("Convex BoxBounds: extent"),
+			TestTrue(TEXT("Convex BoundingBox: extent"),
 			         OutLimits.BoxLimits[0].Extent.Equals(ExpectedExtent, GSimpleWorldTol));
 		}
 
-		// SphereBounds近似: 外接球としてFSphericalLimitを生成
+		// BoundingSphere近似: 外接球としてFSphericalLimitを生成
 		{
 			FKAggregateGeom AggGeom;
 			AggGeom.ConvexElems.Add(ConvexElem);
 			FKawaiiPhysicsSharedCollisionData OutLimits;
 			KawaiiPhysicsSimpleWorldCollision::ConvertAggGeomToLocalLimits(
-				AggGeom, Scale, EKawaiiPhysicsComplexShapeApproximation::SphereBounds, OutLimits);
+				AggGeom, Scale, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingSphere, OutLimits);
 
-			TestTrue(TEXT("Convex SphereBounds: produces exactly one sphere limit and no box limit"),
+			TestTrue(TEXT("Convex BoundingSphere: produces exactly one sphere limit and no box limit"),
 			         OutLimits.SphericalLimits.Num() == 1 && OutLimits.BoxLimits.Num() == 0);
-			TestTrue(TEXT("Convex SphereBounds: location"),
+			TestTrue(TEXT("Convex BoundingSphere: location"),
 			         OutLimits.SphericalLimits[0].Location.Equals(ExpectedLocation, GSimpleWorldTol));
-			TestTrue(TEXT("Convex SphereBounds: radius is the scaled bounding-box extent length"),
+			TestTrue(TEXT("Convex BoundingSphere: radius is the scaled bounding-box extent length"),
 			         FMath::IsNearlyEqual(OutLimits.SphericalLimits[0].Radius, ExpectedExtent.Size(), GSimpleWorldTol));
-			TestTrue(TEXT("Convex SphereBounds: limit type is Outer"),
+			TestTrue(TEXT("Convex BoundingSphere: limit type is Outer"),
 			         OutLimits.SphericalLimits[0].LimitType == ESphericalLimitType::Outer);
 		}
 
@@ -242,7 +345,7 @@ bool FKawaiiPhysicsSimpleWorldConvertAggGeomTest::RunTest(const FString& Paramet
 			AggGeom.ConvexElems.Add(ConvexElem);
 			FKawaiiPhysicsSharedCollisionData OutLimits;
 			KawaiiPhysicsSimpleWorldCollision::ConvertAggGeomToLocalLimits(
-				AggGeom, Scale, EKawaiiPhysicsComplexShapeApproximation::Ignore, OutLimits);
+				AggGeom, Scale, EKawaiiPhysicsSimpleWorldConvexFallbackShape::None, OutLimits);
 
 			TestTrue(TEXT("Convex Ignore: produces no limits"), OutLimits.IsEmpty());
 		}
@@ -272,7 +375,7 @@ bool FKawaiiPhysicsSimpleWorldConvertAggGeomTest::RunTest(const FString& Paramet
 
 		FKawaiiPhysicsSharedCollisionData OutLimits;
 		KawaiiPhysicsSimpleWorldCollision::ConvertAggGeomToLocalLimits(
-			AggGeom, FVector::OneVector, EKawaiiPhysicsComplexShapeApproximation::BoxBounds, OutLimits);
+			AggGeom, FVector::OneVector, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox, OutLimits);
 
 		TestTrue(TEXT("NoCollision sphere and PhysicsOnly box do not produce limits"),
 		         OutLimits.SphericalLimits.Num() == 1 && OutLimits.BoxLimits.Num() == 0);
@@ -302,20 +405,20 @@ bool FKawaiiPhysicsSimpleWorldAppendBoundsLocalLimitsTest::RunTest(const FString
 	{
 		FKawaiiPhysicsSharedCollisionData LocalLimits;
 		KawaiiPhysicsSimpleWorldCollision::AppendBoundsLocalLimits(
-			Bounds, ComponentTM, EKawaiiPhysicsComplexShapeApproximation::BoxBounds, LocalLimits);
+			Bounds, ComponentTM, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox, LocalLimits);
 
 		FKawaiiPhysicsSharedCollisionData WorldLimits;
 		KawaiiPhysicsSimpleWorldCollision::AppendLocalLimitsTransformed(LocalLimits, ComponentTM, WorldLimits);
 
-		TestTrue(TEXT("BoxBounds appends exactly one box"), WorldLimits.BoxLimits.Num() == 1);
+		TestTrue(TEXT("BoundingBox appends exactly one box"), WorldLimits.BoxLimits.Num() == 1);
 		if (WorldLimits.BoxLimits.Num() == 1)
 		{
 			const FBoxLimit& Box = WorldLimits.BoxLimits[0];
-			TestTrue(TEXT("BoxBounds world location stays at Bounds origin"),
+			TestTrue(TEXT("BoundingBox world location stays at Bounds origin"),
 			         Box.Location.Equals(FVector(100.0f, 0.0f, 50.0f), GSimpleWorldTol));
-			TestTrue(TEXT("BoxBounds world rotation stays identity"),
+			TestTrue(TEXT("BoundingBox world rotation stays identity"),
 			         Box.Rotation.Equals(FQuat::Identity, GSimpleWorldTol));
-			TestTrue(TEXT("BoxBounds world extent stays unchanged"),
+			TestTrue(TEXT("BoundingBox world extent stays unchanged"),
 			         Box.Extent.Equals(FVector(10.0f, 1.0f, 1.0f), GSimpleWorldTol));
 		}
 	}
@@ -323,18 +426,18 @@ bool FKawaiiPhysicsSimpleWorldAppendBoundsLocalLimitsTest::RunTest(const FString
 	{
 		FKawaiiPhysicsSharedCollisionData LocalLimits;
 		KawaiiPhysicsSimpleWorldCollision::AppendBoundsLocalLimits(
-			Bounds, ComponentTM, EKawaiiPhysicsComplexShapeApproximation::SphereBounds, LocalLimits);
+			Bounds, ComponentTM, EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingSphere, LocalLimits);
 
 		FKawaiiPhysicsSharedCollisionData WorldLimits;
 		KawaiiPhysicsSimpleWorldCollision::AppendLocalLimitsTransformed(LocalLimits, ComponentTM, WorldLimits);
 
-		TestTrue(TEXT("SphereBounds appends exactly one sphere"), WorldLimits.SphericalLimits.Num() == 1);
+		TestTrue(TEXT("BoundingSphere appends exactly one sphere"), WorldLimits.SphericalLimits.Num() == 1);
 		if (WorldLimits.SphericalLimits.Num() == 1)
 		{
 			const FSphericalLimit& Sphere = WorldLimits.SphericalLimits[0];
-			TestTrue(TEXT("SphereBounds world location stays at Bounds origin"),
+			TestTrue(TEXT("BoundingSphere world location stays at Bounds origin"),
 			         Sphere.Location.Equals(FVector(100.0f, 0.0f, 50.0f), GSimpleWorldTol));
-			TestTrue(TEXT("SphereBounds radius stays unchanged"),
+			TestTrue(TEXT("BoundingSphere radius stays unchanged"),
 			         FMath::IsNearlyEqual(Sphere.Radius, 10.05f, GSimpleWorldTol));
 		}
 	}
@@ -342,7 +445,7 @@ bool FKawaiiPhysicsSimpleWorldAppendBoundsLocalLimitsTest::RunTest(const FString
 	{
 		FKawaiiPhysicsSharedCollisionData LocalLimits;
 		KawaiiPhysicsSimpleWorldCollision::AppendBoundsLocalLimits(
-			Bounds, ComponentTM, EKawaiiPhysicsComplexShapeApproximation::Ignore, LocalLimits);
+			Bounds, ComponentTM, EKawaiiPhysicsSimpleWorldConvexFallbackShape::None, LocalLimits);
 
 		TestTrue(TEXT("Ignore appends no limits"), LocalLimits.IsEmpty());
 	}
@@ -539,9 +642,9 @@ bool FKawaiiPhysicsSimpleWorldDescMergeTest::RunTest(const FString& Parameters)
 		Desc.GatherIntervalSec = 0.1f;
 		Desc.GatherRadiusOverride = 0.0f; // 自動
 		Desc.ObjectTypes = {UEngineTypes::ConvertToObjectType(ECC_WorldStatic)};
-		Desc.ComplexShapeApproximation = EKawaiiPhysicsComplexShapeApproximation::SphereBounds;
-		Desc.SkeletalMeshMode = EKawaiiPhysicsSimpleWorldSkeletalMeshMode::BoundsBox;
-		Desc.bApproximateGround = false;
+		Desc.ConvexFallbackShape = EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingSphere;
+		Desc.SkeletalMeshCollision = EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::BoundingBox;
+		Desc.bGroundCollision = false;
 
 		const FKawaiiPhysicsSimpleWorldCollisionDesc Merged =
 			FKawaiiPhysicsSimpleWorldCollisionDesc::Merge({Desc});
@@ -551,11 +654,11 @@ bool FKawaiiPhysicsSimpleWorldDescMergeTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Single desc: GatherRadiusOverride stays automatic (0)"),
 		         FMath::IsNearlyEqual(Merged.GatherRadiusOverride, 0.0f, GSimpleWorldTol));
 		TestTrue(TEXT("Single desc: ObjectTypes unchanged"), Merged.ObjectTypes.Num() == 1);
-		TestTrue(TEXT("Single desc: ComplexShapeApproximation unchanged"),
-		         Merged.ComplexShapeApproximation == EKawaiiPhysicsComplexShapeApproximation::SphereBounds);
-		TestTrue(TEXT("Single desc: SkeletalMeshMode unchanged"),
-		         Merged.SkeletalMeshMode == EKawaiiPhysicsSimpleWorldSkeletalMeshMode::BoundsBox);
-		TestTrue(TEXT("Single desc: bApproximateGround unchanged"), Merged.bApproximateGround == false);
+		TestTrue(TEXT("Single desc: ConvexFallbackShape unchanged"),
+		         Merged.ConvexFallbackShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingSphere);
+		TestTrue(TEXT("Single desc: SkeletalMeshCollision unchanged"),
+		         Merged.SkeletalMeshCollision == EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::BoundingBox);
+		TestTrue(TEXT("Single desc: bGroundCollision unchanged"), Merged.bGroundCollision == false);
 	}
 
 	// GatherIntervalSec: 最小値優先（0は毎フレーム収集として最優先）
@@ -614,36 +717,36 @@ bool FKawaiiPhysicsSimpleWorldDescMergeTest::RunTest(const FString& Parameters)
 		         Merged.ObjectTypes.Contains(PawnType));
 	}
 
-	// enum優先: SkeletalMeshMode は PhysicsAsset > BoundsBox > Ignore
+	// enum優先: SkeletalMeshCollision は PhysicsAsset > BoundingBox > None
 	{
 		FKawaiiPhysicsSimpleWorldCollisionDesc IgnoreDesc, PhysicsAssetDesc;
-		IgnoreDesc.SkeletalMeshMode = EKawaiiPhysicsSimpleWorldSkeletalMeshMode::Ignore;
-		PhysicsAssetDesc.SkeletalMeshMode = EKawaiiPhysicsSimpleWorldSkeletalMeshMode::PhysicsAsset;
+		IgnoreDesc.SkeletalMeshCollision = EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::None;
+		PhysicsAssetDesc.SkeletalMeshCollision = EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::PhysicsAsset;
 		const FKawaiiPhysicsSimpleWorldCollisionDesc Merged =
 			FKawaiiPhysicsSimpleWorldCollisionDesc::Merge({IgnoreDesc, PhysicsAssetDesc});
-		TestTrue(TEXT("SkeletalMeshMode {Ignore,PhysicsAsset} -> PhysicsAsset"),
-		         Merged.SkeletalMeshMode == EKawaiiPhysicsSimpleWorldSkeletalMeshMode::PhysicsAsset);
+		TestTrue(TEXT("SkeletalMeshCollision {None,PhysicsAsset} -> PhysicsAsset"),
+		         Merged.SkeletalMeshCollision == EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::PhysicsAsset);
 	}
 
-	// enum優先: ComplexShapeApproximation は BoxBounds > SphereBounds > Ignore
+	// enum優先: ConvexFallbackShape は BoundingBox > BoundingSphere > None
 	{
 		FKawaiiPhysicsSimpleWorldCollisionDesc SphereDesc, BoxDesc;
-		SphereDesc.ComplexShapeApproximation = EKawaiiPhysicsComplexShapeApproximation::SphereBounds;
-		BoxDesc.ComplexShapeApproximation = EKawaiiPhysicsComplexShapeApproximation::BoxBounds;
+		SphereDesc.ConvexFallbackShape = EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingSphere;
+		BoxDesc.ConvexFallbackShape = EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox;
 		const FKawaiiPhysicsSimpleWorldCollisionDesc Merged =
 			FKawaiiPhysicsSimpleWorldCollisionDesc::Merge({SphereDesc, BoxDesc});
-		TestTrue(TEXT("ComplexShapeApproximation {SphereBounds,BoxBounds} -> BoxBounds"),
-		         Merged.ComplexShapeApproximation == EKawaiiPhysicsComplexShapeApproximation::BoxBounds);
+		TestTrue(TEXT("ConvexFallbackShape {BoundingSphere,BoundingBox} -> BoundingBox"),
+		         Merged.ConvexFallbackShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox);
 	}
 
 	// ground: OR
 	{
 		FKawaiiPhysicsSimpleWorldCollisionDesc NoGround, WithGround;
-		NoGround.bApproximateGround = false;
-		WithGround.bApproximateGround = true;
+		NoGround.bGroundCollision = false;
+		WithGround.bGroundCollision = true;
 		const FKawaiiPhysicsSimpleWorldCollisionDesc Merged =
 			FKawaiiPhysicsSimpleWorldCollisionDesc::Merge({NoGround, WithGround});
-		TestTrue(TEXT("bApproximateGround {false,true} -> true"), Merged.bApproximateGround == true);
+		TestTrue(TEXT("bGroundCollision {false,true} -> true"), Merged.bGroundCollision == true);
 	}
 
 	return true;
@@ -762,6 +865,110 @@ bool FKawaiiPhysicsSimpleWorldEntryLifecycleTest::RunTest(const FString& Paramet
 }
 
 // ---------------------------------------------------------------------------
+//  DebugInfo
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKawaiiPhysicsSimpleWorldDebugInfoTest,
+                                 "KawaiiPhysics.SimpleWorld.DebugInfo",
+                                 EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FKawaiiPhysicsSimpleWorldDebugInfoTest::RunTest(const FString& Parameters)
+{
+	{
+		FKawaiiPhysicsSimpleWorldCollisionEntry Entry;
+		FKawaiiPhysicsSimpleWorldCollisionDebugInfo Info;
+		UKawaiiPhysicsSharedCollisionSubsystem::FillSimpleWorldCollisionDebugInfo(Entry, Info);
+
+		TestTrue(TEXT("Empty entry sets bHasEntry"), Info.bHasEntry);
+		TestEqual(TEXT("Empty entry NumDescs"), Info.NumDescs, 0);
+		TestEqual(TEXT("Empty entry NumGatheredComponents"), Info.NumGatheredComponents, 0);
+		TestEqual(TEXT("Empty entry NumStaticComponents"), Info.NumStaticComponents, 0);
+		TestEqual(TEXT("Empty entry NumMovableComponents"), Info.NumMovableComponents, 0);
+		TestEqual(TEXT("Empty entry NumSkeletalBodies"), Info.NumSkeletalBodies, 0);
+		TestEqual(TEXT("Empty entry gathered names"), Info.GatheredComponentNames.Num(), 0);
+		TestTrue(TEXT("Empty entry MinFadeAlpha"),
+		         FMath::IsNearlyEqual(Info.MinFadeAlpha, 1.0f, GSimpleWorldTol));
+		TestFalse(TEXT("Empty entry has no ground box"), Info.bHasGroundBox);
+		TestTrue(TEXT("Empty entry GroundSource is None"),
+		         Info.GroundSource == EKawaiiPhysicsSimpleWorldGroundSource::None);
+		TestTrue(TEXT("Empty entry GroundBoxSource is None"),
+		         Info.GroundBoxSource == EKawaiiPhysicsSimpleWorldGroundSource::None);
+		TestTrue(TEXT("Empty entry TimeSinceLastGather is sentinel"),
+		         FMath::IsNearlyEqual(Info.TimeSinceLastGather, -1.0f, GSimpleWorldTol));
+	}
+
+	{
+		FKawaiiPhysicsSimpleWorldCollisionEntry Entry;
+
+		FKawaiiPhysicsSimpleWorldCollisionEntry::FGatheredComponent& StaticComponent =
+			Entry.GatheredComponents.AddDefaulted_GetRef();
+		StaticComponent.Component = NewObject<UStaticMeshComponent>(GetTransientPackage());
+		StaticComponent.bStatic = true;
+		StaticComponent.FadeAlpha = 1.0f;
+
+		FKawaiiPhysicsSimpleWorldCollisionEntry::FGatheredComponent& InvalidInstanceComponent =
+			Entry.GatheredComponents.AddDefaulted_GetRef();
+		InvalidInstanceComponent.bStatic = false;
+		InvalidInstanceComponent.FadeAlpha = 0.25f;
+		InvalidInstanceComponent.InstanceIndex = 2;
+
+		FKawaiiPhysicsSimpleWorldCollisionEntry::FGatheredComponent& SkeletalBodyComponent =
+			Entry.GatheredComponents.AddDefaulted_GetRef();
+		SkeletalBodyComponent.bStatic = false;
+		SkeletalBodyComponent.BodyBindings.SetNum(2);
+
+		Entry.bHasGroundBox = true;
+		Entry.GroundBox.Location = FVector(1.0f, 2.0f, 3.0f);
+		Entry.GroundBox.Extent = FVector(10.0f, 20.0f, 30.0f);
+		Entry.GroundSource = EKawaiiPhysicsSimpleWorldGroundSource::Provider;
+		Entry.GroundBoxSource = EKawaiiPhysicsSimpleWorldGroundSource::CharacterMovement;
+		Entry.LastGatherRadius = 123.0f;
+		Entry.TimeSinceLastGather = 0.05f;
+
+		FKawaiiPhysicsSimpleWorldCollisionDesc Desc;
+		Entry.SetDesc(1, Desc);
+		Entry.SetDesc(2, Desc);
+
+		FKawaiiPhysicsSimpleWorldCollisionDebugInfo Info;
+		UKawaiiPhysicsSharedCollisionSubsystem::FillSimpleWorldCollisionDebugInfo(Entry, Info);
+
+		TestTrue(TEXT("Filled entry sets bHasEntry"), Info.bHasEntry);
+		TestEqual(TEXT("Filled entry NumGatheredComponents"), Info.NumGatheredComponents, 3);
+		TestEqual(TEXT("Filled entry NumStaticComponents"), Info.NumStaticComponents, 1);
+		TestEqual(TEXT("Filled entry NumMovableComponents"), Info.NumMovableComponents, 2);
+		TestEqual(TEXT("Filled entry NumSkeletalBodies"), Info.NumSkeletalBodies, 2);
+		TestEqual(TEXT("Filled entry GatheredComponentNames"), Info.GatheredComponentNames.Num(), 3);
+		if (Info.GatheredComponentNames.Num() == 3)
+		{
+			TestTrue(TEXT("Valid component name uses no-owner prefix"),
+			         Info.GatheredComponentNames[0].StartsWith(TEXT("<no owner>:")));
+			TestTrue(TEXT("Valid component name includes component name"),
+			         Info.GatheredComponentNames[0].Contains(TEXT(":StaticMeshComponent")));
+			TestEqual(TEXT("Invalid ISM name keeps instance index"),
+			          Info.GatheredComponentNames[1], FString(TEXT("<invalid>[2]")));
+			TestEqual(TEXT("Invalid component name"), Info.GatheredComponentNames[2], FString(TEXT("<invalid>")));
+		}
+		TestTrue(TEXT("Filled entry MinFadeAlpha"),
+		         FMath::IsNearlyEqual(Info.MinFadeAlpha, 0.25f, GSimpleWorldTol));
+		TestEqual(TEXT("Filled entry NumDescs"), Info.NumDescs, 2);
+		TestTrue(TEXT("Filled entry GatherRadius"),
+		         FMath::IsNearlyEqual(Info.GatherRadius, 123.0f, GSimpleWorldTol));
+		TestTrue(TEXT("Filled entry TimeSinceLastGather"),
+		         FMath::IsNearlyEqual(Info.TimeSinceLastGather, 0.05f, GSimpleWorldTol));
+		TestTrue(TEXT("Filled entry GroundBoxLocation"),
+		         Info.GroundBoxLocation.Equals(FVector(1.0f, 2.0f, 3.0f), GSimpleWorldTol));
+		TestTrue(TEXT("Filled entry GroundBoxExtent"),
+		         Info.GroundBoxExtent.Equals(FVector(10.0f, 20.0f, 30.0f), GSimpleWorldTol));
+		TestTrue(TEXT("Filled entry has ground box"), Info.bHasGroundBox);
+		TestTrue(TEXT("Filled entry GroundSource"),
+		         Info.GroundSource == EKawaiiPhysicsSimpleWorldGroundSource::Provider);
+		TestTrue(TEXT("Filled entry GroundBoxSource"),
+		         Info.GroundBoxSource == EKawaiiPhysicsSimpleWorldGroundSource::CharacterMovement);
+	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 //  FKawaiiPhysicsSimpleWorldCollisionEntry の即時cleanup回帰
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FKawaiiPhysicsSimpleWorldEntrySetDescSurvivesImmediateCleanupTest,
@@ -849,6 +1056,10 @@ bool FKawaiiPhysicsSimpleWorldCollisionPushOutTest::RunTest(const FString& Param
 		FKawaiiPhysicsTestAccessor A;
 		BuildChain(A);
 		A.SetSimpleWorldLimits(SphereLimits, EmptyCapsules, EmptyTaperedCapsules, EmptyBoxes);
+
+		TestEqual(TEXT("Injected SimpleWorld collider count"),
+		          A.Node.GetNumSimpleWorldColliders(),
+		          SphereLimits.Num() + EmptyCapsules.Num() + EmptyTaperedCapsules.Num() + EmptyBoxes.Num());
 
 		A.StepFrame(1.0f / 60.0f);
 
@@ -1120,7 +1331,7 @@ bool FKawaiiPhysicsSimpleWorldAppendBodyLocalLimitsGuardTest::RunTest(const FStr
 		         SphereAggGeom,
 		         0,
 		         FVector::OneVector,
-		         EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+		         EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 		         2,
 		         OutLimits,
 		         Bindings));
@@ -1129,7 +1340,7 @@ bool FKawaiiPhysicsSimpleWorldAppendBodyLocalLimitsGuardTest::RunTest(const FStr
 		         SphereAggGeom,
 		         1,
 		         FVector::OneVector,
-		         EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+		         EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 		         2,
 		         OutLimits,
 		         Bindings));
@@ -1141,7 +1352,7 @@ bool FKawaiiPhysicsSimpleWorldAppendBodyLocalLimitsGuardTest::RunTest(const FStr
 		         SphereAggGeom,
 		         2,
 		         FVector::OneVector,
-		         EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+		         EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 		         2,
 		         OutLimits,
 		         Bindings));
@@ -1155,7 +1366,7 @@ bool FKawaiiPhysicsSimpleWorldAppendBodyLocalLimitsGuardTest::RunTest(const FStr
 		         EmptyAggGeom,
 		         3,
 		         FVector::OneVector,
-		         EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+		         EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 		         10,
 		         OutLimits,
 		         Bindings));
@@ -1169,16 +1380,16 @@ bool FKawaiiPhysicsSimpleWorldAppendBodyLocalLimitsGuardTest::RunTest(const FStr
 	{
 		FKawaiiPhysicsSharedCollisionData ConvexLimits;
 		TArray<FKawaiiPhysicsSimpleWorldBodyBinding> ConvexBindings;
-		TestTrue(TEXT("Convex BoxBounds body is accepted"),
+		TestTrue(TEXT("Convex BoundingBox body is accepted"),
 		         KawaiiPhysicsSimpleWorldCollision::AppendBodyLocalLimits(
 			         ConvexAggGeom,
 			         0,
 			         FVector::OneVector,
-			         EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+			         EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 			         10,
 			         ConvexLimits,
 			         ConvexBindings));
-		TestTrue(TEXT("Convex BoxBounds binding records one box"),
+		TestTrue(TEXT("Convex BoundingBox binding records one box"),
 		         ConvexBindings.Num() == 1 &&
 		         ConvexBindings[0].NumBoxLimits == 1 &&
 		         ConvexBindings[0].NumSphericalLimits == 0);
@@ -1187,16 +1398,16 @@ bool FKawaiiPhysicsSimpleWorldAppendBodyLocalLimitsGuardTest::RunTest(const FStr
 	{
 		FKawaiiPhysicsSharedCollisionData ConvexLimits;
 		TArray<FKawaiiPhysicsSimpleWorldBodyBinding> ConvexBindings;
-		TestTrue(TEXT("Convex SphereBounds body is accepted"),
+		TestTrue(TEXT("Convex BoundingSphere body is accepted"),
 		         KawaiiPhysicsSimpleWorldCollision::AppendBodyLocalLimits(
 			         ConvexAggGeom,
 			         0,
 			         FVector::OneVector,
-			         EKawaiiPhysicsComplexShapeApproximation::SphereBounds,
+			         EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingSphere,
 			         10,
 			         ConvexLimits,
 			         ConvexBindings));
-		TestTrue(TEXT("Convex SphereBounds binding records one sphere"),
+		TestTrue(TEXT("Convex BoundingSphere binding records one sphere"),
 		         ConvexBindings.Num() == 1 &&
 		         ConvexBindings[0].NumSphericalLimits == 1 &&
 		         ConvexBindings[0].NumBoxLimits == 0);
@@ -1270,7 +1481,7 @@ bool FKawaiiPhysicsSimpleWorldAppendPhysicsAssetLocalLimitsTest::RunTest(const F
 			*PhysicsAsset,
 			RefSkeleton,
 			FVector::OneVector,
-			EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+			EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 			32,
 			OutLimits,
 			Bindings);
@@ -1296,7 +1507,7 @@ bool FKawaiiPhysicsSimpleWorldAppendPhysicsAssetLocalLimitsTest::RunTest(const F
 			*PhysicsAsset,
 			RefSkeleton,
 			FVector::OneVector,
-			EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+			EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 			1,
 			OutLimits,
 			Bindings);
@@ -1332,7 +1543,7 @@ bool FKawaiiPhysicsSimpleWorldAppendPhysicsAssetLocalLimitsTest::RunTest(const F
 			*DisabledBodyPhysicsAsset,
 			RefSkeleton,
 			FVector::OneVector,
-			EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+			EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 			32,
 			OutLimits,
 			Bindings);
@@ -1368,7 +1579,7 @@ bool FKawaiiPhysicsSimpleWorldAppendPhysicsAssetLocalLimitsTest::RunTest(const F
 			*NoCollisionShapePhysicsAsset,
 			RefSkeleton,
 			FVector::OneVector,
-			EKawaiiPhysicsComplexShapeApproximation::BoxBounds,
+			EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox,
 			32,
 			OutLimits,
 			Bindings);

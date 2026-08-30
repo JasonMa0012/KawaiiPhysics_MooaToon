@@ -16,10 +16,22 @@
 
 #include "KawaiiPhysicsSharedCollisionSubsystem.generated.h"
 
+class AActor;
 class UPrimitiveComponent;
 class UPhysicsAsset;
 class USkeletalMeshComponent;
 class USkinnedAsset;
+class UCharacterMovementComponent;
+
+// 地面ソースの種類（DebugDraw の色分けにも使う） / Ground source kind (also used for debug draw colors)
+UENUM(BlueprintType)
+enum class EKawaiiPhysicsSimpleWorldGroundSource : uint8
+{
+	None UMETA(DisplayName = "None"),
+	Provider UMETA(DisplayName = "Provider"),
+	CharacterMovement UMETA(DisplayName = "Character Movement"),
+	Trace UMETA(DisplayName = "Trace"),
+};
 
 /**
  * Source1つ分の共有コリジョンスロット
@@ -104,9 +116,9 @@ struct KAWAIIPHYSICS_API FKawaiiPhysicsSimpleWorldCollisionDesc
 	float GatherIntervalSec = 0.2f;
 	float GatherRadiusOverride = 0.0f;
 	TArray<TEnumAsByte<EObjectTypeQuery>> ObjectTypes;
-	EKawaiiPhysicsComplexShapeApproximation ComplexShapeApproximation = EKawaiiPhysicsComplexShapeApproximation::BoxBounds;
-	EKawaiiPhysicsSimpleWorldSkeletalMeshMode SkeletalMeshMode = EKawaiiPhysicsSimpleWorldSkeletalMeshMode::Ignore;
-	bool bApproximateGround = true;
+	EKawaiiPhysicsSimpleWorldConvexFallbackShape ConvexFallbackShape = EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox;
+	EKawaiiPhysicsSimpleWorldSkeletalMeshCollision SkeletalMeshCollision = EKawaiiPhysicsSimpleWorldSkeletalMeshCollision::None;
+	bool bGroundCollision = true;
 
 	/**
 	 * 複数ノードの収集設定を SkelComp 単位の1設定へマージする。
@@ -119,12 +131,12 @@ struct KAWAIIPHYSICS_API FKawaiiPhysicsSimpleWorldCollisionDesc
 	 * - GatherRadiusOverride is the max only when every Desc specifies an override. If any Desc is automatic, it stays 0 and Tick uses the automatic radius.
 	 * - ObjectTypes は union。空配列は WorldStatic + WorldDynamic の意味なので、空 Desc がある場合はそれらを明示的に union へ含める。
 	 * - ObjectTypes are unioned. Empty means WorldStatic + WorldDynamic, so those are explicitly included when any Desc is empty.
-	 * - ComplexShapeApproximation は BoxBounds > SphereBounds > Ignore の優先。
-	 * - ComplexShapeApproximation priority is BoxBounds > SphereBounds > Ignore.
-	 * - SkeletalMeshMode は PhysicsAsset > BoundsBox > Ignore の優先。
-	 * - SkeletalMeshMode priority is PhysicsAsset > BoundsBox > Ignore.
-	 * - bApproximateGround は OR。
-	 * - bApproximateGround is OR.
+	 * - ConvexFallbackShape は BoundingBox > BoundingSphere > None の優先。
+	 * - ConvexFallbackShape priority is BoundingBox > BoundingSphere > None.
+	 * - SkeletalMeshCollision は PhysicsAsset > BoundingBox > None の優先。
+	 * - SkeletalMeshCollision priority is PhysicsAsset > BoundingBox > None.
+	 * - bGroundCollision は OR。
+	 * - bGroundCollision is OR.
 	 */
 	static FKawaiiPhysicsSimpleWorldCollisionDesc Merge(const TArray<FKawaiiPhysicsSimpleWorldCollisionDesc>& Descs);
 
@@ -150,6 +162,7 @@ struct KAWAIIPHYSICS_API FKawaiiPhysicsSimpleWorldCollisionEntry
 	void RemoveExpiredDescs(uint64 CurrentFrame, uint64 MaxAge);
 	bool HasAnyDesc() const;
 	bool BuildMergedDesc(FKawaiiPhysicsSimpleWorldCollisionDesc& OutMerged) const;
+	int32 GetNumDescs() const;
 
 	void RequestRegather();
 	bool ConsumeRegatherRequested();
@@ -158,6 +171,8 @@ struct KAWAIIPHYSICS_API FKawaiiPhysicsSimpleWorldCollisionEntry
 
 	// Tick スレッド専有・ロック不要 / Tick-thread only; no lock required.
 	float TimeSinceLastGather = FLT_MAX;
+	// 直近の収集で使った実効半径 / Effective radius used by the latest gather
+	float LastGatherRadius = 0.0f;
 
 	struct FGatheredComponent
 	{
@@ -213,6 +228,16 @@ struct KAWAIIPHYSICS_API FKawaiiPhysicsSimpleWorldCollisionEntry
 	bool bHasGatheredOnce = false;
 	bool bHasGroundBox = false;
 	FBoxLimit GroundBox;
+	// 収集フレームごとにアタッチ連鎖から解決した、利用可能な最上位ソース（Provider > CharacterMovement > Trace）
+	// Highest-priority source available, resolved by walking the attach chain every gather frame (Provider > CharacterMovement > Trace)
+	EKawaiiPhysicsSimpleWorldGroundSource GroundSource = EKawaiiPhysicsSimpleWorldGroundSource::None;
+	// 現在の GroundBox を作ったソース（DebugDraw の色分け用。GroundSource は選択可能な最上位ソース） / Source that produced the current GroundBox (for debug draw colors; GroundSource is the highest-priority source available)
+	EKawaiiPhysicsSimpleWorldGroundSource GroundBoxSource = EKawaiiPhysicsSimpleWorldGroundSource::None;
+	// 収集フレームでアタッチ連鎖から見つかった Provider。GroundCharacterMovement とは独立にキャッシュする / Provider found while walking the attach chain during the gather frame; cached independently of GroundCharacterMovement
+	TWeakObjectPtr<UObject> GroundProvider;
+	// 収集フレームでアタッチ連鎖から見つかった CharacterMovementComponent。Provider が bHit=false を返した場合のフォールバック先 / CharacterMovementComponent found while walking the attach chain during the gather frame; used as the fallback when Provider returns bHit=false
+	TWeakObjectPtr<UCharacterMovementComponent> GroundCharacterMovement;
+	TWeakObjectPtr<const UPrimitiveComponent> GroundComponent;
 	FKawaiiPhysicsSharedCollisionData PublishScratch;
 	TArray<FOverlapResult> OverlapScratch;
 	bool bWorldLimitsDirty = true;
@@ -227,6 +252,80 @@ private:
 	TMap<uint64, FDescSlot> DescSlots;
 	mutable FRWLock DescLock;
 	std::atomic<bool> bRegatherRequested{false};
+};
+
+USTRUCT(BlueprintType)
+struct KAWAIIPHYSICS_API FKawaiiPhysicsSimpleWorldCollisionDebugInfo
+{
+	GENERATED_BODY()
+
+	// SkelComp に対応する SimpleWorld Entry が存在したか / Whether a SimpleWorld entry exists for SkelComp
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	bool bHasEntry = false;
+
+	// Entry に登録されている Desc 数（ノード数） / Number of descs registered to the entry (node count)
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	int32 NumDescs = 0;
+
+	// GatheredComponents.Num() / GatheredComponents.Num()
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	int32 NumGatheredComponents = 0;
+
+	// bStatic == true の件数 / Number of entries with bStatic == true
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	int32 NumStaticComponents = 0;
+
+	// bStatic == false の件数 / Number of entries with bStatic == false
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	int32 NumMovableComponents = 0;
+
+	// 全 GatheredComponents の BodyBindings.Num() 合計 / Sum of BodyBindings.Num() across all GatheredComponents
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	int32 NumSkeletalBodies = 0;
+
+	// 収集順のコンポーネント名 / Component names in gathered order
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	TArray<FString> GatheredComponentNames;
+
+	// 収集コンポーネントの FadeAlpha の最小値（0 件なら 1.0） / Minimum FadeAlpha of gathered components (1.0 when empty)
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	float MinFadeAlpha = 1.0f;
+
+	// Entry.bHasGroundBox / Entry.bHasGroundBox
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	bool bHasGroundBox = false;
+
+	// Entry.GroundSource / Entry.GroundSource
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	EKawaiiPhysicsSimpleWorldGroundSource GroundSource = EKawaiiPhysicsSimpleWorldGroundSource::None;
+
+	// Entry.GroundBoxSource / Entry.GroundBoxSource
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	EKawaiiPhysicsSimpleWorldGroundSource GroundBoxSource = EKawaiiPhysicsSimpleWorldGroundSource::None;
+
+	// Entry.GroundBox.Location（bHasGroundBox 時のみ意味あり） / Entry.GroundBox.Location (meaningful only when bHasGroundBox)
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	FVector GroundBoxLocation = FVector::ZeroVector;
+
+	// Entry.GroundBox.Rotation.Rotator() / Entry.GroundBox.Rotation.Rotator()
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	FRotator GroundBoxRotation = FRotator::ZeroRotator;
+
+	// Entry.GroundBox.Extent / Entry.GroundBox.Extent
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	FVector GroundBoxExtent = FVector::ZeroVector;
+
+	// 直近の収集で使った実効半径 / Effective radius used by the latest gather
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	float GatherRadius = 0.0f;
+
+	// Entry.TimeSinceLastGather（FLT_MAX のときは -1.0） / Entry.TimeSinceLastGather (-1.0 when FLT_MAX)
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	float TimeSinceLastGather = 0.0f;
+
+	// Entry.bHasGatheredOnce / Entry.bHasGatheredOnce
+	UPROPERTY(BlueprintReadOnly, Category = "Kawaii Physics|Simple World Collision")
+	bool bHasGatheredOnce = false;
 };
 
 /**
@@ -269,6 +368,22 @@ public:
 	 * For targets: Find an entry for the actor family root. Thread-safe via RegistryLock; callable from any thread.
 	 */
 	TSharedPtr<FKawaiiPhysicsSharedCollisionEntry> FindEntry(AActor* Actor, const FGameplayTag& Tag) const;
+
+	/**
+	 * Entry の Tick 専有データから診断情報を詰める（GameThread 専用。テストから直接呼べるよう static）
+	 * Fill diagnostics from an entry's tick-owned data (GameThread only; static so tests can call it directly)
+	 */
+	static void FillSimpleWorldCollisionDebugInfo(const FKawaiiPhysicsSimpleWorldCollisionEntry& Entry,
+	                                              FKawaiiPhysicsSimpleWorldCollisionDebugInfo& OutInfo);
+
+	/**
+	 * SkelComp の SimpleWorld Entry を検索し診断情報を返す。Entry が無ければ false（OutInfo は既定値＋bHasEntry=false）。
+	 * GameThread 専用。Shipping では常に false。
+	 * Look up the SimpleWorld entry for SkelComp and return diagnostics. Returns false when no entry exists
+	 * (OutInfo is reset with bHasEntry=false). GameThread only. Always false in Shipping builds.
+	 */
+	bool BuildSimpleWorldCollisionDebugInfo(const USkeletalMeshComponent* SkelComp,
+	                                        FKawaiiPhysicsSimpleWorldCollisionDebugInfo& OutInfo) const;
 
 	// USubsystem interface
 	virtual void Deinitialize() override;
