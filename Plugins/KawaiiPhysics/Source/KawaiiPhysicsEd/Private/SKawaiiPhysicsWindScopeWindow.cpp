@@ -12,6 +12,9 @@
 #include "ExternalForces/KawaiiPhysicsExternalForce_ProceduralWind.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
+// Mooa Include FMenuBuilder declaration for UE5.7.
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+// Mooa End
 #include "HAL/CriticalSection.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "ISettingsModule.h"
