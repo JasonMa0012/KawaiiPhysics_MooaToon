@@ -11,6 +11,7 @@
 #endif
 #include "KawaiiPhysicsLimitsDataAsset.h"
 #include "KawaiiPhysicsSharedCollisionSubsystem.h"
+#include "KawaiiPhysicsSharedTags.h"
 #include "Animation/AnimInstanceProxy.h"
 #include "Curves/CurveFloat.h"
 #include "Runtime/Launch/Resources/Version.h"
@@ -108,6 +109,9 @@ TAutoConsoleVariable<int32> CVarSharedCollisionInitRetryThrottleInterval(
 TAutoConsoleVariable<float> CVarSharedCollisionCleanupInterval(
 	TEXT("a.AnimNode.KawaiiPhysics.SharedCollision.CleanupInterval"), 1.0f,
 	TEXT("クリーンアップ間隔（秒） / Cleanup interval in seconds."));
+TAutoConsoleVariable<int32> CVarSharedCollisionEnableInPreviewWorld(
+	TEXT("a.AnimNode.KawaiiPhysics.SharedCollision.EnableInPreviewWorld"), 1,
+	TEXT("1でPersona等のプレビューワールド（EditorPreview）でもSharedCollision Subsystemを生成する。0で従来どおり生成しない / 1 creates the SharedCollision subsystem in preview worlds (EditorPreview, e.g. Persona) too; 0 keeps the legacy behavior (not created)."));
 
 // SimpleWorldCollision CVars
 TAutoConsoleVariable<int32> CVarSimpleWorldCollisionEnable(
@@ -124,6 +128,10 @@ TAutoConsoleVariable<int32> CVarSimpleWorldCollisionMaxPhysicsAssetBodies(
 	TEXT("a.AnimNode.KawaiiPhysics.SimpleWorldCollision.MaxPhysicsAssetBodies"), -1,
 	TEXT("-1でDeveloperSettingsの値を使用。0でPhysicsAssetモードのSkeletalMeshを収集しない。1以上でSkelComp単位最大body数を上書き / "
 		"-1 uses the DeveloperSettings value; 0 does not gather SkeletalMeshes in PhysicsAsset mode; >=1 overrides the max PhysicsAsset bodies per SkelComp."));
+TAutoConsoleVariable<int32> CVarSimpleWorldCollisionMaxConvexPlanes(
+	TEXT("a.AnimNode.KawaiiPhysics.SimpleWorldCollision.MaxConvexPlanes"), -1,
+	TEXT("-1でDeveloperSettingsの値を使用。0以上でConvex Hull 1つあたりの最大平面数を上書き / "
+		"-1 uses the DeveloperSettings value; >=0 overrides the max planes per convex hull."));
 TAutoConsoleVariable<int32> CVarSimpleWorldCollisionRegatherOnScaleChange(
 	TEXT("a.AnimNode.KawaiiPhysics.SimpleWorldCollision.RegatherOnScaleChange"), -1,
 	TEXT("-1でDeveloperSettingsの値を使用。0で無効、1でスケール変化時に再収集 / "
@@ -143,6 +151,16 @@ TAutoConsoleVariable<int32> CVarSimpleWorldCollisionUseMovementGround(
 	TEXT("a.AnimNode.KawaiiPhysics.SimpleWorldCollision.UseMovementGround"), 1,
 	TEXT("1で所有Actorの地面情報（IKawaiiPhysicsGroundProvider / CharacterMovementComponent）を地面Boxに使う。0で従来の下方向トレースのみ / "
 		"1 uses the owner's ground info (IKawaiiPhysicsGroundProvider / CharacterMovementComponent) for the ground box; 0 uses only the legacy downward trace."));
+TAutoConsoleVariable<int32> CVarSimpleWorldCollisionReaderReleaseMaxAge(
+	TEXT("a.AnimNode.KawaiiPhysics.SharedPublisher.ReaderReleaseMaxAge"), 60,
+	TEXT("共有 Entry の provider が更新を止めてから reader が Entry を解放するまでの猶予フレーム数 / "
+		"Frames a reader keeps a shared entry after its provider stopped updating before releasing it."));
+TAutoConsoleVariable<int32> CVarSimpleWorldCollisionAutoResolveInterval(
+	TEXT("a.AnimNode.KawaiiPhysics.SharedPublisher.AutoResolveInterval"), 30,
+	TEXT("Frames between Auto Simple World Collision checks while running as a local provider."));
+TAutoConsoleVariable<int32> CVarSimpleWorldCollisionSharedPublisherDebugDraw(
+	TEXT("a.AnimNode.KawaiiPhysics.SharedPublisher.DebugDraw"), 0,
+	TEXT("Draw Shared Publisher Simple World Collision labels from the subsystem tick."));
 
 DEFINE_STAT(STAT_KawaiiPhysics_InitModifyBones);
 DEFINE_STAT(STAT_KawaiiPhysics_Eval);
@@ -189,8 +207,19 @@ DEFINE_STAT(STAT_KawaiiPhysics_NumMergedBoneConstraints);
 DEFINE_STAT(STAT_KawaiiPhysics_NumWorldCollisionChecks);
 DEFINE_STAT(STAT_KawaiiPhysics_ModifyBonesMemory);
 
+int32 GetKawaiiPhysicsSharedPublisherReaderReleaseMaxAge()
+{
+	return CVarSimpleWorldCollisionReaderReleaseMaxAge.GetValueOnAnyThread();
+}
+
+int32 GetKawaiiPhysicsSharedPublisherAutoResolveInterval()
+{
+	return CVarSimpleWorldCollisionAutoResolveInterval.GetValueOnAnyThread();
+}
+
 FAnimNode_KawaiiPhysics::FAnimNode_KawaiiPhysics()
 {
+	SimpleWorldCollisionSharedTag = TAG_KawaiiPhysics_Shared_Default;
 }
 
 void FAnimNode_KawaiiPhysics::Initialize_AnyThread(const FAnimationInitializeContext& Context)
@@ -230,11 +259,25 @@ void FAnimNode_KawaiiPhysics::Initialize_AnyThread(const FAnimationInitializeCon
 	// シンプルワールドコリジョンのキャッシュをリセット
 	ReleaseSimpleWorldCollision();
 	SimpleWorldMergedScratch.Reset();
+	SimpleWorldGroundScratch.Reset();
 	SimpleWorldSphericalLimits.Reset();
 	SimpleWorldCapsuleLimits.Reset();
 	SimpleWorldTaperedCapsuleLimits.Reset();
 	SimpleWorldBoxLimits.Reset();
-	bSimpleWorldRadiusWarningLogged = false;
+	SimpleWorldGroundBoxLimits.Reset();
+	SimpleWorldConvexLimits.Reset();
+	LastReadSimpleWorldShapeSerial = 0;
+	LastReadSimpleWorldGroundSerial = 0;
+	LastReadSimpleWorldMemberSerialSum = 0;
+	SimpleWorldReaderRetryCount = 0;
+	bSimpleWorldReaderWarningLogged = false;
+	SimpleWorldResolvedSource = EKawaiiPhysicsSimpleWorldCollisionSource::Local;
+	SimpleWorldAutoResolveCountdown = 0;
+#if !UE_BUILD_SHIPPING
+	bSimpleWorldInvalidSharedTagWarningLogged = false;
+#endif
+	bSimpleWorldRadiusChecked = false;
+	SimpleWorldRadiusCheckDeferrals = 0;
 
 	ApplyLimitsDataAsset(RequiredBones);
 	ApplyPhysicsAsset(RequiredBones);
@@ -802,10 +845,10 @@ void FAnimNode_KawaiiPhysics::EvaluateSkeletalControl_AnyThread(FComponentSpaceP
 		{
 			InitializeSimpleWorldCollision();
 		}
-		if (CachedSimpleWorldEntry.IsValid())
+		if (CachedSimpleWorldEntry.IsValid() || bSimpleWorldReaderMode)
 		{
 			UpdateSimpleWorldCollisionLimits(Output);
-			if (TeleportType == ETeleportType::TeleportPhysics)
+			if (TeleportType == ETeleportType::TeleportPhysics && CachedSimpleWorldEntry.IsValid())
 			{
 				CachedSimpleWorldEntry->RequestRegather();
 			}
@@ -816,10 +859,18 @@ void FAnimNode_KawaiiPhysics::EvaluateSkeletalControl_AnyThread(FComponentSpaceP
 		// ランタイム無効化時は自Descを即時解除し、古い押し出しを残さない
 		ReleaseSimpleWorldCollision();
 		SimpleWorldMergedScratch.Reset();
+		SimpleWorldGroundScratch.Reset();
 		SimpleWorldSphericalLimits.Reset();
 		SimpleWorldCapsuleLimits.Reset();
 		SimpleWorldTaperedCapsuleLimits.Reset();
 		SimpleWorldBoxLimits.Reset();
+		SimpleWorldGroundBoxLimits.Reset();
+		SimpleWorldConvexLimits.Reset();
+		LastReadSimpleWorldShapeSerial = 0;
+		LastReadSimpleWorldGroundSerial = 0;
+		LastReadSimpleWorldMemberSerialSum = 0;
+		SimpleWorldReaderRetryCount = 0;
+		bSimpleWorldReaderWarningLogged = false;
 	}
 
 	// 入力規模カウンタ & メモリの更新（毎フレーム。負荷=N×L等の相関とダミー膨張の可視化用）
@@ -834,7 +885,8 @@ void FAnimNode_KawaiiPhysics::EvaluateSkeletalControl_AnyThread(FComponentSpaceP
 	               SharedBoxLimits.Num() + SharedPlanarLimits.Num());
 	SET_DWORD_STAT(STAT_KawaiiPhysics_NumSimpleWorldColliders,
 	               SimpleWorldSphericalLimits.Num() + SimpleWorldCapsuleLimits.Num() +
-	               SimpleWorldTaperedCapsuleLimits.Num() + SimpleWorldBoxLimits.Num());
+	               SimpleWorldTaperedCapsuleLimits.Num() + SimpleWorldBoxLimits.Num() +
+	               SimpleWorldGroundBoxLimits.Num() + SimpleWorldConvexLimits.Num());
 	SET_DWORD_STAT(STAT_KawaiiPhysics_NumMergedBoneConstraints, MergedBoneConstraints.Num());
 	SET_MEMORY_STAT(STAT_KawaiiPhysics_ModifyBonesMemory,
 	                ModifyBones.GetAllocatedSize() + MergedBoneConstraints.GetAllocatedSize());

@@ -2,6 +2,10 @@
 
 #include "KawaiiPhysicsSimpleWorldCollision.h"
 
+#include "KawaiiPhysicsSharedCollisionSubsystem.h"
+#include "KawaiiPhysicsSharedPublisherTypes.h"
+
+#include "Algo/StableSort.h"
 #include "Engine/EngineTypes.h"
 #include "Misc/EngineVersionComparison.h"
 #include "PhysicsEngine/PhysicsAsset.h"
@@ -43,6 +47,15 @@ namespace
 
 	void ApplyRadiusScale(FBoxLimit&, float)
 	{
+	}
+
+	void ApplyRadiusScale(FKawaiiPhysicsConvexLimit&, float)
+	{
+	}
+
+	bool IsFiniteVector(const FVector& Vector)
+	{
+		return FMath::IsFinite(Vector.X) && FMath::IsFinite(Vector.Y) && FMath::IsFinite(Vector.Z);
 	}
 
 	template <typename LimitType>
@@ -115,6 +128,69 @@ namespace
 
 namespace KawaiiPhysicsSimpleWorldCollision
 {
+	FCollisionResponseParams BuildSimpleWorldResponseParams(
+		const TArray<TEnumAsByte<EObjectTypeQuery>>& ObjectTypes)
+	{
+		FCollisionResponseParams Params(ECR_Ignore);
+		if (ObjectTypes.IsEmpty())
+		{
+			Params.CollisionResponse.SetResponse(ECC_WorldStatic, ECR_Block);
+			Params.CollisionResponse.SetResponse(ECC_WorldDynamic, ECR_Block);
+			return Params;
+		}
+
+		for (const TEnumAsByte<EObjectTypeQuery>& ObjectType : ObjectTypes)
+		{
+			const ECollisionChannel CollisionChannel = UEngineTypes::ConvertToCollisionChannel(ObjectType.GetValue());
+			if (CollisionChannel != ECC_MAX)
+			{
+				Params.CollisionResponse.SetResponse(CollisionChannel, ECR_Block);
+			}
+		}
+		return Params;
+	}
+
+	bool IsSimpleWorldGatherInputValid(const FVector& Center, float Radius)
+	{
+		return !Center.ContainsNaN()
+			&& FMath::IsFinite(Radius)
+			&& Radius > KINDA_SMALL_NUMBER;
+	}
+
+	bool ShouldUseSimpleWorldGatherOrder(int32 NumOverlaps, int32 MaxGatheredComponents)
+	{
+		// 上限 0（CVar で指定可）では visit ループが即座に打ち切られるため、距離計算と StableSort を払わない（master と同じ O(1)）。
+		return MaxGatheredComponents > 0 && NumOverlaps > MaxGatheredComponents;
+	}
+
+	void SortSimpleWorldGatherOrderByDistance(TArrayView<const float> DistanceSquared, TArray<int32>& OutOrder)
+	{
+		OutOrder.Reset(DistanceSquared.Num());
+		for (int32 Index = 0; Index < DistanceSquared.Num(); ++Index)
+		{
+			OutOrder.Add(Index);
+		}
+
+		Algo::StableSort(OutOrder, [&DistanceSquared](int32 Lhs, int32 Rhs)
+		{
+			return DistanceSquared[Lhs] < DistanceSquared[Rhs];
+		});
+	}
+
+	bool IsSimpleWorldProviderAlive(
+		const FKawaiiPhysicsSimpleWorldCollisionEntry& Entry,
+		uint64 CurrentFrame,
+		uint64 ProviderMaxAgeFrames)
+	{
+		if (!Entry.HasProviderDesc())
+		{
+			return false;
+		}
+
+		const uint64 LastProviderFrame = Entry.GetLastProviderFrame();
+		return CurrentFrame <= LastProviderFrame || CurrentFrame - LastProviderFrame <= ProviderMaxAgeFrames;
+	}
+
 	void AppendBoundsLocalLimits(
 		const FBoxSphereBounds& Bounds,
 		const FTransform& ComponentTM,
@@ -127,8 +203,10 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		}
 
 		const FVector LocalCenter = ComponentTM.InverseTransformPosition(Bounds.Origin);
-		if (BoundsShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox)
+		if (BoundsShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::ConvexHull
+			|| BoundsShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox)
 		{
+			// Bounds にはハルの平面情報が無いため、ConvexHull 指定でも BoundingBox として扱う。
 			FBoxLimit NewLimit;
 			InitializeSimpleWorldLimit(NewLimit);
 			NewLimit.Location = LocalCenter;
@@ -146,6 +224,201 @@ namespace KawaiiPhysicsSimpleWorldCollision
 			NewLimit.LimitType = ESphericalLimitType::Outer;
 			OutLocalLimits.SphericalLimits.Add(NewLimit);
 		}
+	}
+
+	bool AppendConvexElemLocalLimit(
+		TArrayView<const FPlane> BodySpacePlanes,
+		TArrayView<const FVector> ElemLocalVertices,
+		TArrayView<const int32> Indices,
+		const FTransform& ElemTM,
+		const FVector& Scale3D,
+		int32 MaxConvexPlanes,
+		bool bBuildDebugGeometry,
+		FKawaiiPhysicsSharedCollisionData& OutLocalLimits)
+	{
+		if (BodySpacePlanes.Num() == 0
+			|| BodySpacePlanes.Num() > MaxConvexPlanes
+			|| ElemLocalVertices.Num() == 0
+			|| FMath::Abs(Scale3D.X) < KINDA_SMALL_NUMBER
+			|| FMath::Abs(Scale3D.Y) < KINDA_SMALL_NUMBER
+			|| FMath::Abs(Scale3D.Z) < KINDA_SMALL_NUMBER)
+		{
+			return false;
+		}
+
+		for (const FPlane& BodySpacePlane : BodySpacePlanes)
+		{
+			const FVector PlaneNormal(BodySpacePlane.X, BodySpacePlane.Y, BodySpacePlane.Z);
+			if (!IsFiniteVector(PlaneNormal)
+				|| !FMath::IsFinite(BodySpacePlane.W)
+				|| PlaneNormal.SizeSquared() <= FMath::Square(KINDA_SMALL_NUMBER))
+			{
+				return false;
+			}
+		}
+
+		TArray<FVector> ScaledVertices;
+		ScaledVertices.Reserve(ElemLocalVertices.Num());
+
+		FBox ScaledBounds(ForceInit);
+		for (const FVector& ElemLocalVertex : ElemLocalVertices)
+		{
+			if (!IsFiniteVector(ElemLocalVertex))
+			{
+				return false;
+			}
+
+			const FVector ScaledVertex = ElemTM.TransformPosition(ElemLocalVertex) * Scale3D;
+			if (!IsFiniteVector(ScaledVertex))
+			{
+				return false;
+			}
+
+			ScaledVertices.Add(ScaledVertex);
+			ScaledBounds += ScaledVertex;
+		}
+
+		if (!ScaledBounds.IsValid)
+		{
+			return false;
+		}
+
+		const FVector LocalCenter = ScaledBounds.GetCenter();
+
+		FKawaiiPhysicsConvexLimit NewLimit;
+		InitializeSimpleWorldLimit(NewLimit);
+		NewLimit.Location = LocalCenter;
+		NewLimit.Rotation = FQuat::Identity;
+		NewLimit.LocalBounds = FBox(ScaledBounds.Min - LocalCenter, ScaledBounds.Max - LocalCenter);
+		NewLimit.LocalPlanes.Reserve(BodySpacePlanes.Num());
+
+		for (const FPlane& BodySpacePlane : BodySpacePlanes)
+		{
+			const FVector PlaneNormal(BodySpacePlane.X, BodySpacePlane.Y, BodySpacePlane.Z);
+			const FVector BodySpacePoint = PlaneNormal * BodySpacePlane.W;
+			const FVector ScaledPoint = BodySpacePoint * Scale3D;
+			// 平面法線は逆転置でスケール変換する。負スケールでも外向き性はこの変換で保たれるため、符号反転は不要。
+			const FVector ScaledNormal = FVector(
+				PlaneNormal.X / Scale3D.X,
+				PlaneNormal.Y / Scale3D.Y,
+				PlaneNormal.Z / Scale3D.Z).GetSafeNormal();
+			if (!IsFiniteVector(ScaledPoint)
+				|| !IsFiniteVector(ScaledNormal)
+				|| ScaledNormal.IsNearlyZero(KINDA_SMALL_NUMBER))
+			{
+				return false;
+			}
+
+			const float ScaledW = FVector::DotProduct(ScaledNormal, ScaledPoint);
+			const float LocalW = ScaledW - FVector::DotProduct(ScaledNormal, LocalCenter);
+			if (!FMath::IsFinite(LocalW))
+			{
+				return false;
+			}
+
+			NewLimit.LocalPlanes.Add(FPlane(ScaledNormal.X, ScaledNormal.Y, ScaledNormal.Z, LocalW));
+		}
+
+#if !UE_BUILD_SHIPPING
+		if (bBuildDebugGeometry)
+		{
+			NewLimit.LocalVertices.Reserve(ScaledVertices.Num());
+			for (const FVector& ScaledVertex : ScaledVertices)
+			{
+				NewLimit.LocalVertices.Add(ScaledVertex - LocalCenter);
+			}
+
+			struct FDebugConvexEdge
+			{
+				int32 IndexA = INDEX_NONE;
+				int32 IndexB = INDEX_NONE;
+				FVector FirstTriangleNormal = FVector::ZeroVector;
+				int32 NumTriangles = 0;
+				bool bHasNonCoplanarNeighbor = false;
+			};
+
+			TMap<uint64, FDebugConvexEdge> UniqueEdges;
+			UniqueEdges.Reserve(Indices.Num());
+			NewLimit.LocalEdges.Reserve(Indices.Num() * 2);
+
+			const int32 VertexCount = ElemLocalVertices.Num();
+			auto AppendEdge = [&UniqueEdges, VertexCount](
+				int32 IndexA,
+				int32 IndexB,
+				const FVector& TriangleNormal)
+			{
+				if (IndexA == IndexB
+					|| IndexA < 0
+					|| IndexB < 0
+					|| IndexA >= VertexCount
+					|| IndexB >= VertexCount)
+				{
+					return;
+				}
+
+				const uint32 MinIndex = static_cast<uint32>(FMath::Min(IndexA, IndexB));
+				const uint32 MaxIndex = static_cast<uint32>(FMath::Max(IndexA, IndexB));
+				const uint64 EdgeKey = (static_cast<uint64>(MinIndex) << 32) | static_cast<uint64>(MaxIndex);
+				if (FDebugConvexEdge* ExistingEdge = UniqueEdges.Find(EdgeKey))
+				{
+					++ExistingEdge->NumTriangles;
+					if (!TriangleNormal.IsNearlyZero()
+						&& !ExistingEdge->FirstTriangleNormal.IsNearlyZero()
+						&& FMath::Abs(FVector::DotProduct(TriangleNormal, ExistingEdge->FirstTriangleNormal)) < 1.0f - KINDA_SMALL_NUMBER)
+					{
+						ExistingEdge->bHasNonCoplanarNeighbor = true;
+					}
+					return;
+				}
+
+				FDebugConvexEdge NewEdge;
+				NewEdge.IndexA = static_cast<int32>(MinIndex);
+				NewEdge.IndexB = static_cast<int32>(MaxIndex);
+				NewEdge.FirstTriangleNormal = TriangleNormal;
+				NewEdge.NumTriangles = 1;
+				UniqueEdges.Add(EdgeKey, NewEdge);
+			};
+
+			for (int32 TriangleIndex = 0; TriangleIndex + 2 < Indices.Num(); TriangleIndex += 3)
+			{
+				const int32 Index0 = Indices[TriangleIndex];
+				const int32 Index1 = Indices[TriangleIndex + 1];
+				const int32 Index2 = Indices[TriangleIndex + 2];
+				if (Index0 < 0
+					|| Index1 < 0
+					|| Index2 < 0
+					|| Index0 >= ScaledVertices.Num()
+					|| Index1 >= ScaledVertices.Num()
+					|| Index2 >= ScaledVertices.Num())
+				{
+					continue;
+				}
+
+				const FVector TriangleNormal = FVector::CrossProduct(
+					ScaledVertices[Index1] - ScaledVertices[Index0],
+					ScaledVertices[Index2] - ScaledVertices[Index0]).GetSafeNormal();
+				AppendEdge(Index0, Index1, TriangleNormal);
+				AppendEdge(Index1, Index2, TriangleNormal);
+				AppendEdge(Index2, Index0, TriangleNormal);
+			}
+
+			for (const TPair<uint64, FDebugConvexEdge>& EdgePair : UniqueEdges)
+			{
+				const FDebugConvexEdge& Edge = EdgePair.Value;
+				if (Edge.NumTriangles == 1 || Edge.bHasNonCoplanarNeighbor)
+				{
+					NewLimit.LocalEdges.Add(Edge.IndexA);
+					NewLimit.LocalEdges.Add(Edge.IndexB);
+				}
+			}
+		}
+#else
+		(void)bBuildDebugGeometry;
+		(void)Indices;
+#endif
+
+		OutLocalLimits.ConvexLimits.Add(MoveTemp(NewLimit));
+		return true;
 	}
 
 	bool BuildSimpleWorldGroundBox(
@@ -172,10 +445,29 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		return true;
 	}
 
+	FBoxLimit MakeSimpleWorldGroundBoxLocal(const FBoxLimit& WorldBox, const FTransform& ComponentTM)
+	{
+		FBoxLimit Result = WorldBox;
+		const FQuat InverseComponentRotation = ComponentTM.GetRotation().Inverse();
+		Result.Location = ComponentTM.InverseTransformPosition(WorldBox.Location);
+		Result.Rotation = (InverseComponentRotation * WorldBox.Rotation).GetNormalized();
+		return Result;
+	}
+
+	FBoxLimit TransformSimpleWorldGroundBox(const FBoxLimit& LocalBox, const FTransform& ComponentTM)
+	{
+		FBoxLimit Result = LocalBox;
+		Result.Location = ComponentTM.TransformPosition(LocalBox.Location);
+		Result.Rotation = (ComponentTM.GetRotation() * LocalBox.Rotation).GetNormalized();
+		return Result;
+	}
+
 	void ConvertAggGeomToLocalLimits(
 		const FKAggregateGeom& AggGeom,
 		const FVector& Scale3D,
 		EKawaiiPhysicsSimpleWorldConvexFallbackShape ConvexFallbackShape,
+		int32 MaxConvexPlanes,
+		bool bBuildConvexDebugGeometry,
 		FKawaiiPhysicsSharedCollisionData& OutLocalLimits)
 	{
 		OutLocalLimits.SphericalLimits.Reserve(OutLocalLimits.SphericalLimits.Num() + AggGeom.SphereElems.Num());
@@ -239,6 +531,7 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		}
 
 		OutLocalLimits.BoxLimits.Reserve(OutLocalLimits.BoxLimits.Num() + AggGeom.BoxElems.Num() + AggGeom.ConvexElems.Num());
+		OutLocalLimits.ConvexLimits.Reserve(OutLocalLimits.ConvexLimits.Num() + AggGeom.ConvexElems.Num());
 		for (const auto& BoxElem : AggGeom.BoxElems)
 		{
 			if (!CollisionEnabledHasQuery(BoxElem.GetCollisionEnabled()))
@@ -256,11 +549,34 @@ namespace KawaiiPhysicsSimpleWorldCollision
 			OutLocalLimits.BoxLimits.Add(NewLimit);
 		}
 
+		TArray<FPlane> ConvexPlanes;
 		for (const auto& ConvexElem : AggGeom.ConvexElems)
 		{
 			if (!CollisionEnabledHasQuery(ConvexElem.GetCollisionEnabled()))
 			{
 				continue;
+			}
+
+			if (ConvexFallbackShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::ConvexHull)
+			{
+				ConvexPlanes.Reset();
+				ConvexElem.GetPlanes(ConvexPlanes);
+				// GetPlanes の平面は ElemTM 適用済みの body 空間なので、ここで ElemTM は再適用しない。
+				// 頂点は elem ローカルのため ElemTM を適用する。非一様スケールと Elem 回転の組み合わせでも平面経路は厳密。
+				if (AppendConvexElemLocalLimit(
+					MakeArrayView(ConvexPlanes),
+					MakeArrayView(ConvexElem.VertexData),
+					MakeArrayView(ConvexElem.IndexData),
+					ConvexElem.GetTransform(),
+					Scale3D,
+					MaxConvexPlanes,
+					bBuildConvexDebugGeometry,
+					OutLocalLimits))
+				{
+					continue;
+				}
+
+				// 未クック、上限超過、退化平面などは従来どおり BoundingBox へフォールバックする。
 			}
 
 			if (!ConvexElem.ElemBox.IsValid)
@@ -280,7 +596,8 @@ namespace KawaiiPhysicsSimpleWorldCollision
 				continue;
 			}
 
-			if (ConvexFallbackShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox)
+			if (ConvexFallbackShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::ConvexHull
+				|| ConvexFallbackShape == EKawaiiPhysicsSimpleWorldConvexFallbackShape::BoundingBox)
 			{
 				FBoxLimit NewLimit;
 				InitializeSimpleWorldLimit(NewLimit);
@@ -323,6 +640,9 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		AppendTransformedLimits(
 			MakeKawaiiPhysicsSimpleWorldLimitView(LocalLimits.BoxLimits, 0, LocalLimits.BoxLimits.Num()),
 			ComponentTM, OutWorldLimits.BoxLimits);
+		AppendTransformedLimits(
+			MakeKawaiiPhysicsSimpleWorldLimitView(LocalLimits.ConvexLimits, 0, LocalLimits.ConvexLimits.Num()),
+			ComponentTM, OutWorldLimits.ConvexLimits);
 		AppendTransformedPlanarLimits(LocalLimits.PlanarLimits, ComponentTM, OutWorldLimits.PlanarLimits);
 	}
 
@@ -331,6 +651,8 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		int32 BoneIndex,
 		const FVector& Scale3D,
 		EKawaiiPhysicsSimpleWorldConvexFallbackShape ConvexFallbackShape,
+		int32 MaxConvexPlanes,
+		bool bBuildConvexDebugGeometry,
 		int32 MaxBodies,
 		FKawaiiPhysicsSharedCollisionData& OutLocalLimits,
 		TArray<FKawaiiPhysicsSimpleWorldBodyBinding>& OutBindings)
@@ -345,8 +667,15 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		const int32 CapsuleOffset = OutLocalLimits.CapsuleLimits.Num();
 		const int32 TaperedCapsuleOffset = OutLocalLimits.TaperedCapsuleLimits.Num();
 		const int32 BoxOffset = OutLocalLimits.BoxLimits.Num();
+		const int32 ConvexOffset = OutLocalLimits.ConvexLimits.Num();
 
-		ConvertAggGeomToLocalLimits(AggGeom, Scale3D, ConvexFallbackShape, OutLocalLimits);
+		ConvertAggGeomToLocalLimits(
+			AggGeom,
+			Scale3D,
+			ConvexFallbackShape,
+			MaxConvexPlanes,
+			bBuildConvexDebugGeometry,
+			OutLocalLimits);
 
 		FKawaiiPhysicsSimpleWorldBodyBinding NewBinding;
 		NewBinding.BoneIndex = BoneIndex;
@@ -354,11 +683,13 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		NewBinding.NumCapsuleLimits = OutLocalLimits.CapsuleLimits.Num() - CapsuleOffset;
 		NewBinding.NumTaperedCapsuleLimits = OutLocalLimits.TaperedCapsuleLimits.Num() - TaperedCapsuleOffset;
 		NewBinding.NumBoxLimits = OutLocalLimits.BoxLimits.Num() - BoxOffset;
+		NewBinding.NumConvexLimits = OutLocalLimits.ConvexLimits.Num() - ConvexOffset;
 
 		const int32 NumAddedLimits = NewBinding.NumSphericalLimits
 			+ NewBinding.NumCapsuleLimits
 			+ NewBinding.NumTaperedCapsuleLimits
-			+ NewBinding.NumBoxLimits;
+			+ NewBinding.NumBoxLimits
+			+ NewBinding.NumConvexLimits;
 		if (NumAddedLimits == 0)
 		{
 			return false;
@@ -373,6 +704,8 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		const FReferenceSkeleton& RefSkeleton,
 		const FVector& Scale3D,
 		EKawaiiPhysicsSimpleWorldConvexFallbackShape ConvexFallbackShape,
+		int32 MaxConvexPlanes,
+		bool bBuildConvexDebugGeometry,
 		int32 MaxBodies,
 		FKawaiiPhysicsSharedCollisionData& OutLocalLimits,
 		TArray<FKawaiiPhysicsSimpleWorldBodyBinding>& OutBindings)
@@ -432,6 +765,8 @@ namespace KawaiiPhysicsSimpleWorldCollision
 				Candidate.BoneIndex,
 				Scale3D,
 				ConvexFallbackShape,
+				MaxConvexPlanes,
+				bBuildConvexDebugGeometry,
 				MaxBodies,
 				OutLocalLimits,
 				OutBindings);
@@ -481,6 +816,7 @@ namespace KawaiiPhysicsSimpleWorldCollision
 		int32 CapsuleOffset = 0;
 		int32 TaperedCapsuleOffset = 0;
 		int32 BoxOffset = 0;
+		int32 ConvexOffset = 0;
 
 		const int32 NumBodies = FMath::Min(Bindings.Num(), BodyWorldTMs.Num());
 		for (int32 BodyIndex = 0; BodyIndex < NumBodies; ++BodyIndex)
@@ -513,12 +849,19 @@ namespace KawaiiPhysicsSimpleWorldCollision
 						LocalLimits.BoxLimits, BoxOffset, Binding.NumBoxLimits),
 					BodyWorldTM,
 					OutWorldLimits.BoxLimits);
+				// Convex は半径縮小できないため、Box と同じしきい値ゲートを共用する。
+				AppendTransformedLimits(
+					MakeKawaiiPhysicsSimpleWorldLimitView(
+						LocalLimits.ConvexLimits, ConvexOffset, Binding.NumConvexLimits),
+					BodyWorldTM,
+					OutWorldLimits.ConvexLimits);
 			}
 
 			SphereOffset += Binding.NumSphericalLimits;
 			CapsuleOffset += Binding.NumCapsuleLimits;
 			TaperedCapsuleOffset += Binding.NumTaperedCapsuleLimits;
 			BoxOffset += Binding.NumBoxLimits;
+			ConvexOffset += Binding.NumConvexLimits;
 		}
 	}
 
@@ -546,7 +889,45 @@ namespace KawaiiPhysicsSimpleWorldCollision
 			AppendTransformedLimits(
 				MakeKawaiiPhysicsSimpleWorldLimitView(LocalLimits.BoxLimits, 0, LocalLimits.BoxLimits.Num()),
 				ComponentTM, OutWorldLimits.BoxLimits);
+			// Convex は半径縮小できないため、Box と同じしきい値ゲートを共用する。
+			AppendTransformedLimits(
+				MakeKawaiiPhysicsSimpleWorldLimitView(LocalLimits.ConvexLimits, 0, LocalLimits.ConvexLimits.Num()),
+				ComponentTM, OutWorldLimits.ConvexLimits);
 		}
 		AppendTransformedPlanarLimits(LocalLimits.PlanarLimits, ComponentTM, OutWorldLimits.PlanarLimits);
+	}
+
+	bool ComputeSimpleWorldGatherBounds(
+		TArrayView<const FBoxSphereBounds> MemberBounds,
+		FBoxSphereBounds& OutBounds)
+	{
+		if (MemberBounds.IsEmpty())
+		{
+			return false;
+		}
+
+		OutBounds = MemberBounds[0];
+		for (int32 Index = 1; Index < MemberBounds.Num(); ++Index)
+		{
+			OutBounds = OutBounds + MemberBounds[Index];
+		}
+		return true;
+	}
+
+	FKawaiiPhysicsSimpleWorldCollisionDesc BuildSimpleWorldCollisionDesc(
+		const FKawaiiPhysicsSimpleWorldCollisionSettings& Settings)
+	{
+		FKawaiiPhysicsSimpleWorldCollisionDesc Desc;
+		Desc.GatherIntervalSec = Settings.GatherInterval;
+		Desc.GatherRadiusOverride = Settings.bOverrideGatherRadius ? Settings.GatherRadius : 0.0f;
+		Desc.CollisionChannel = Settings.bOverrideCollisionChannel ? Settings.CollisionChannel.GetValue() : ECC_MAX;
+		Desc.ObjectTypes = Settings.ObjectTypes;
+		Desc.ConvexFallbackShape = Settings.ConvexFallbackShape;
+		Desc.SkeletalMeshCollision = Settings.SkeletalMeshCollision;
+		Desc.bGroundCollision = Settings.bGroundCollision;
+		Desc.GatherScope = Settings.GatherScope;
+		Desc.bGatherFamilyMembers = Settings.bGatherFamilyMembers;
+		Desc.bProviderDisabled = !Settings.bEnabled;
+		return Desc;
 	}
 }

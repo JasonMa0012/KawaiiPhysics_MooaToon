@@ -8,6 +8,8 @@
 #include "AnimNode_KawaiiPhysics.h"
 #include "KawaiiPhysicsTypes.h"
 #include "KawaiiPhysicsCollisionLimits.h"
+#include "KawaiiPhysicsSharedPublisherTypes.h"
+#include "UObject/Package.h"
 
 /**
  * 自動テスト用アクセサ
@@ -164,18 +166,220 @@ struct FKawaiiPhysicsTestAccessor
 	}
 
 	/**
-	 * SimpleWorld コリジョン配列（Subsystem が本来収集する4形状）を直接注入し、bUseSimpleWorldCollision も true にする。
-	 * Injects the SimpleWorld collision arrays (the four shapes the Subsystem normally gathers) directly and enables bUseSimpleWorldCollision.
+	 * SimpleWorld コリジョン配列（Subsystem が本来収集する形状と地面 Box）を直接注入し、bUseSimpleWorldCollision も true にする。
+	 * Injects the SimpleWorld collision arrays (the shapes and ground box the Subsystem normally gathers) directly and enables bUseSimpleWorldCollision.
 	 */
 	void SetSimpleWorldLimits(const TArray<FSphericalLimit>& Spherical, const TArray<FCapsuleLimit>& Capsule,
-	                          const TArray<FTaperedCapsuleLimit>& TaperedCapsule, const TArray<FBoxLimit>& Box)
+	                          const TArray<FTaperedCapsuleLimit>& TaperedCapsule, const TArray<FBoxLimit>& Box,
+	                          const TArray<FKawaiiPhysicsConvexLimit>& Convex,
+	                          const TArray<FBoxLimit>& GroundBox = TArray<FBoxLimit>())
 	{
 		Node.SimpleWorldSphericalLimits = Spherical;
 		Node.SimpleWorldCapsuleLimits = Capsule;
 		Node.SimpleWorldTaperedCapsuleLimits = TaperedCapsule;
 		Node.SimpleWorldBoxLimits = Box;
+		Node.SimpleWorldGroundBoxLimits = GroundBox;
+		Node.SimpleWorldConvexLimits = Convex;
 		Node.bUseSimpleWorldCollision = true;
 	}
+
+	/**
+	 * SimpleWorld コリジョン Entry を Subsystem 経由なしで直接注入し、読み取り経路を有効化する。
+	 * Injects a SimpleWorld collision Entry directly without the Subsystem and enables the read path.
+	 */
+	void SetSimpleWorldEntry(const TSharedPtr<FKawaiiPhysicsSimpleWorldCollisionEntry>& Entry)
+	{
+		Node.CachedSimpleWorldEntry = Entry;
+		Node.SimpleWorldAutomationLocalEntry = Entry;
+		Node.bUseSimpleWorldCollision = true;
+		Node.bSimpleWorldCollisionInitialized = true;
+		Node.bSimpleWorldDescSent = false;
+	}
+
+	void SetSimpleWorldCollisionSource(EKawaiiPhysicsSimpleWorldCollisionSource Source)
+	{
+		Node.SimpleWorldCollisionSource = Source;
+		Node.RequestSimpleWorldCollisionReinit();
+	}
+
+	void SetSimpleWorldCollisionSharedTag(const FGameplayTag& SharedTag)
+	{
+		Node.SimpleWorldCollisionSharedTag = SharedTag;
+		Node.RequestSimpleWorldCollisionReinit();
+	}
+
+	void SetSimpleWorldSharedEntryForAuto(const TSharedPtr<FKawaiiPhysicsSimpleWorldCollisionEntry>& Entry)
+	{
+		Node.SimpleWorldAutomationSharedEntry = Entry;
+		Node.SimpleWorldSharedKey.KeyObject = GetTransientPackage();
+		Node.SimpleWorldSharedKey.Tag = Node.SimpleWorldCollisionSharedTag;
+	}
+
+	void SetSimpleWorldLocalEntryForAuto(const TSharedPtr<FKawaiiPhysicsSimpleWorldCollisionEntry>& Entry)
+	{
+		Node.SimpleWorldAutomationLocalEntry = Entry;
+	}
+
+	void InitializeSimpleWorldCollision()
+	{
+		Node.InitializeSimpleWorldCollision();
+	}
+
+	void InjectSharedPublisherState(const FKawaiiPhysicsSharedPublisherState& State,
+	                                const TSharedPtr<FKawaiiPhysicsSimpleWorldCollisionEntry>& Entry,
+	                                uint64 ProviderID = 0xFFFF0001)
+	{
+		if (Entry.IsValid())
+		{
+			Entry->SetDesc(ProviderID, State.SimpleWorldDesc, GFrameCounter,
+			               TWeakObjectPtr<const USkeletalMeshComponent>(), true);
+		}
+
+		FKawaiiPhysicsSimpleWorldRegistryKey Key;
+		Key.KeyObject = GetTransientPackage();
+		Node.CachedSimpleWorldEntry.Reset();
+		Node.SetSimpleWorldReaderKey(Key);
+		Node.CachedSimpleWorldEntry = Entry;
+		Node.bUseSimpleWorldCollision = true;
+		Node.bSimpleWorldCollisionInitialized = Entry.IsValid();
+		Node.bSimpleWorldDescSent = false;
+
+		if (Entry.IsValid())
+		{
+			Entry->AddReaderMember(
+				reinterpret_cast<uint64>(&Node),
+				Node.CachedSimpleWorldCollisionSkelComp,
+				GFrameCounter);
+		}
+	}
+
+	void SetSimpleWorldOwnSkelComp(const USkeletalMeshComponent* SkelComp)
+	{
+		Node.CachedSimpleWorldCollisionSkelComp = SkelComp;
+	}
+
+	bool IsSimpleWorldReaderMode() const
+	{
+		return Node.bSimpleWorldReaderMode;
+	}
+
+	EKawaiiPhysicsSimpleWorldCollisionSource GetSimpleWorldResolvedSource() const
+	{
+		return Node.GetSimpleWorldResolvedSource();
+	}
+
+	const FKawaiiPhysicsSimpleWorldRegistryKey& GetSimpleWorldReaderKey() const
+	{
+		return Node.SimpleWorldReaderKey;
+	}
+
+	int32 GetSimpleWorldReaderRetryCount() const
+	{
+		return Node.SimpleWorldReaderRetryCount;
+	}
+
+	bool IsSimpleWorldReaderWarningLogged() const
+	{
+		return Node.bSimpleWorldReaderWarningLogged;
+	}
+
+	uint64 GetLastReadSimpleWorldMemberSerialSum() const
+	{
+		return Node.LastReadSimpleWorldMemberSerialSum;
+	}
+
+	const TArray<FSphericalLimit>& GetSimpleWorldSphericalLimits() const
+	{
+		return Node.SimpleWorldSphericalLimits;
+	}
+
+	const TArray<FCapsuleLimit>& GetSimpleWorldCapsuleLimits() const
+	{
+		return Node.SimpleWorldCapsuleLimits;
+	}
+
+	const TArray<FTaperedCapsuleLimit>& GetSimpleWorldTaperedCapsuleLimits() const
+	{
+		return Node.SimpleWorldTaperedCapsuleLimits;
+	}
+
+	const TArray<FBoxLimit>& GetSimpleWorldBoxLimits() const
+	{
+		return Node.SimpleWorldBoxLimits;
+	}
+
+	const TArray<FBoxLimit>& GetSimpleWorldGroundBoxLimits() const
+	{
+		return Node.SimpleWorldGroundBoxLimits;
+	}
+
+	const TArray<FKawaiiPhysicsConvexLimit>& GetSimpleWorldConvexLimits() const
+	{
+		return Node.SimpleWorldConvexLimits;
+	}
+
+	bool HasSimpleWorldEntry() const
+	{
+		return Node.CachedSimpleWorldEntry.IsValid();
+	}
+
+	/**
+	 * SimpleWorld コリジョンのワーカー側読み取り更新を呼び出す。
+	 * Calls the worker-side SimpleWorld collision read update.
+	 */
+	void UpdateSimpleWorldCollisionLimits(FComponentSpacePoseContext& Output)
+	{
+		Node.UpdateSimpleWorldCollisionLimits(Output);
+	}
+
+	/**
+	 * 現在読み込んでいる SimpleWorld コリジョン形状数を返す。
+	 * Returns the number of SimpleWorld collision shapes currently read.
+	 */
+	int32 GetNumSimpleWorldColliders() const
+	{
+		return Node.GetNumSimpleWorldColliders();
+	}
+
+	/**
+	 * 最後に読み取った SimpleWorld 形状 Slot の Publish serial を返す。
+	 * Returns the last read publish serial of the SimpleWorld shape Slot.
+	 */
+	uint64 GetLastReadSimpleWorldShapeSerial() const
+	{
+		return Node.LastReadSimpleWorldShapeSerial;
+	}
+
+	/** SimpleWorld Desc の地面コリジョン有無を切り替える（Desc 変化を起こすため） */
+	void SetSimpleWorldGroundCollision(bool bEnable)
+	{
+		Node.bSimpleWorldCollisionGroundCollision = bEnable;
+	}
+
+	bool GetSimpleWorldGroundCollision() const
+	{
+		return Node.bSimpleWorldCollisionGroundCollision;
+	}
+
+	void SetSimpleWorldGatherRadiusOverride(float Radius)
+	{
+		Node.bOverrideSimpleWorldCollisionGatherRadius = true;
+		Node.SimpleWorldCollisionGatherRadius = Radius;
+		Node.bSimpleWorldRadiusChecked = false;
+		Node.SimpleWorldRadiusCheckDeferrals = 0;
+	}
+
+	void CheckSimpleWorldGatherRadius(FComponentSpacePoseContext& Output)
+	{
+		Node.CheckSimpleWorldGatherRadius(Output);
+	}
+
+	bool IsSimpleWorldRadiusChecked() const
+	{
+		return Node.bSimpleWorldRadiusChecked;
+	}
+
+	uint8 GetSimpleWorldRadiusCheckDeferrals() const { return Node.SimpleWorldRadiusCheckDeferrals; }
 
 	/** 固定サブステッピング設定（DeveloperSettings の代わりに直接指定） */
 	void SetFixedSubstepping(bool bEnable, int32 TargetFps, int32 MaxSubsteps = 8)
@@ -339,6 +543,14 @@ struct FKawaiiPhysicsTestAccessor
 			Limit.UpdateRuntimeCache();
 		}
 		Node.AdjustByBoxCollision(Bone, Limits);
+	}
+	void CallConvexCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FKawaiiPhysicsConvexLimit>& Limits)
+	{
+		for (FKawaiiPhysicsConvexLimit& Limit : Limits)
+		{
+			Limit.UpdateRuntimeCache();
+		}
+		Node.AdjustByConvexCollision(Bone, Limits);
 	}
 	void CallPlanarCollision(FKawaiiPhysicsModifyBone& Bone, TArray<FPlanarLimit>& Limits)
 	{
@@ -601,6 +813,8 @@ private:
 				Node.AdjustByCapsuleCollision(Bone, Node.SimpleWorldCapsuleLimits);
 				Node.AdjustByTaperedCapsuleCollision(Bone, Node.SimpleWorldTaperedCapsuleLimits);
 				Node.AdjustByBoxCollision(Bone, Node.SimpleWorldBoxLimits);
+				Node.AdjustByBoxCollision(Bone, Node.SimpleWorldGroundBoxLimits);
+				Node.AdjustByConvexCollision(Bone, Node.SimpleWorldConvexLimits);
 			}
 		}
 
